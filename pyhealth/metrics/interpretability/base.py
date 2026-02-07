@@ -246,6 +246,12 @@ class RemovalBasedMetric(ABC):
 
                     mask = masks[key]
 
+                    # Ensure mask dimensions match x_values for broadcasting
+                    # Attribution methods may return [batch, seq_len] while
+                    # x_values is [batch, seq_len, num_features]
+                    while mask.dim() < x_values.dim():
+                        mask = mask.unsqueeze(-1)
+
                     # Check if values are integers (discrete features)
                     is_discrete = x_values.dtype in [
                         torch.long,
@@ -311,6 +317,10 @@ class RemovalBasedMetric(ABC):
                 continue
 
             mask = masks[key]
+
+            # Ensure mask dimensions match input for broadcasting
+            while mask.dim() < x.dim():
+                mask = mask.unsqueeze(-1)
 
             # Apply ablation strategy
             if self.ablation_strategy == "zero":

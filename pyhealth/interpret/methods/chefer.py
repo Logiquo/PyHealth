@@ -229,7 +229,10 @@ class CheferRelevance(BaseInterpreter):
         if class_index is None:
             class_index = torch.argmax(logits, dim=-1)
 
-        one_hot = F.one_hot(torch.tensor(class_index), logits.size()[1]).float()
+        if isinstance(class_index, torch.Tensor):
+            one_hot = F.one_hot(class_index.detach().clone(), logits.size()[1]).float()
+        else:
+            one_hot = F.one_hot(torch.tensor(class_index), logits.size()[1]).float()
         one_hot = one_hot.requires_grad_(True)
         one_hot = torch.sum(one_hot.to(logits.device) * logits)
         self.model.zero_grad()
@@ -242,12 +245,13 @@ class CheferRelevance(BaseInterpreter):
             for block in feature_transformer:
                 num_tokens[key] = block.attention.get_attn_map().shape[-1]
 
+        batch_size = logits.shape[0]
         attn = {}
         for key in feature_keys:
             R = (
                 torch.eye(num_tokens[key])
                 .unsqueeze(0)
-                .repeat(len(data[key]), 1, 1)
+                .repeat(batch_size, 1, 1)
                 .to(logits.device)
             )
             for blk in self.model.transformer[key].transformer:
