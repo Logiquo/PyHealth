@@ -12,7 +12,7 @@ import datetime
 import argparse
 from pyhealth.datasets import MIMIC4Dataset, get_dataloader, sample_balanced
 from collections import Counter
-from pyhealth.interpret.methods import BaseInterpreter, IntegratedGradients, DeepLift, GIM, ShapExplainer, LimeExplainer
+from pyhealth.interpret.methods import BaseInterpreter, IntegratedGradients, DeepLift, GIM, ShapExplainer, LimeExplainer, CheferRelevance
 from pyhealth.metrics.interpretability import evaluate_attribution
 from pyhealth.models import Transformer
 from pyhealth.tasks import DKAPredictionMIMIC4
@@ -21,7 +21,7 @@ from pyhealth.datasets.utils import load_processors
 from pathlib import Path
 import pandas as pd
 
-# python -u examples/interpretability/dka_transformer_mimic4_interpret.py --methods lime --device cuda:2 2>&1 | tee -a /shared/eng/pyhealth_dka/output/dka_transformer_mimic4/lime.log
+# python -u examples/interpretability/dka_transformer_mimic4_interpret.py --methods chefer --device cuda:2 2>&1 | tee -a /shared/eng/pyhealth_dka/output/dka_transformer_mimic4/chefer.log
 def main():
     parser = argparse.ArgumentParser(
         description="Comma separated list of interpretability methods to evaluate"
@@ -129,6 +129,7 @@ def main():
     print(f"✓ Model moved to {device}")
 
     methods: dict[str, BaseInterpreter] = {
+        "chefer": CheferRelevance(model),
         "ig": IntegratedGradients(model, use_embeddings=True),
         "deeplift": DeepLift(model, use_embeddings=True),
         "gim": GIM(model),
