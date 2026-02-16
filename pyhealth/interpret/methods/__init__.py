@@ -1,4 +1,5 @@
 from pyhealth.interpret.methods.base_interpreter import BaseInterpreter
+from pyhealth.interpret.methods.attention import AttentionRollout
 from pyhealth.interpret.methods.baseline import RandomBaseline
 from pyhealth.interpret.methods.chefer import CheferRelevance
 from pyhealth.interpret.methods.basic_gradient import BasicGradientSaliencyMaps
@@ -10,6 +11,7 @@ from pyhealth.interpret.methods.shap import ShapExplainer
 from pyhealth.interpret.methods.lime import LimeExplainer
 
 __all__ = [
+    "AttentionRollout",
     "BaseInterpreter",
     "CheferRelevance",
     "DeepLift",

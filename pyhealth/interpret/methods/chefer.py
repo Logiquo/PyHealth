@@ -11,6 +11,28 @@ Paper:
     Encoder-Decoder Transformers."
     Proceedings of the IEEE/CVF International Conference on Computer Vision
     (ICCV), 2021.
+
+Relationship to Attention Rollout
+---------------------------------
+This method extends Attention Rollout (Abnar & Zuidema, 2020) — a
+gradient-free technique that multiplies raw attention matrices across
+layers to track information flow.  Chefer's method improves on rollout
+in two key ways:
+
+1. **Gradient weighting** — attention maps are element-wise multiplied by
+   their gradients before aggregation, focusing relevance on the parts of
+   attention that actually matter for the predicted class.
+2. **Positive clamping** — the gradient-weighted maps are clamped to
+   non-negative values (``clamp(attn * grad, min=0)``), suppressing
+   inhibitory signal.
+
+These additions make Chefer's method **class-specific** (attributions
+change depending on which output class is targeted) at the cost of
+requiring a backward pass, whereas Attention Rollout is class-agnostic
+and forward-only.
+
+See :class:`~pyhealth.interpret.methods.attention.AttentionRollout` for
+the rollout implementation.
 """
 
 from typing import Dict, Optional, cast
@@ -84,6 +106,24 @@ class CheferRelevance(BaseInterpreter):
     Steps 1, 4 and 6 are delegated to the model through the
     ``CheferInterpretable`` interface, making this class fully
     model-agnostic.
+
+    **Comparison to Attention Rollout:**
+
+    +---------------------+-------------------+---------------------------+
+    | Aspect              | Attention Rollout | Chefer                    |
+    +=====================+===================+===========================+
+    | Backward pass       | No                | Yes                       |
+    +---------------------+-------------------+---------------------------+
+    | Gradient weighting   | No (avg heads)    | Yes (grad * attn)        |
+    +---------------------+-------------------+---------------------------+
+    | Positive clamping   | No                | Yes (clamp min=0)         |
+    +---------------------+-------------------+---------------------------+
+    | Residual connection | Explicit (I + A)  | Implicit (R += cam @ R)   |
+    +---------------------+-------------------+---------------------------+
+    | Class-specific      | No                | Yes                       |
+    +---------------------+-------------------+---------------------------+
+    | Speed               | Faster            | Slower                    |
+    +---------------------+-------------------+---------------------------+
 
     Args:
         model (BaseModel): A trained PyHealth model that implements
