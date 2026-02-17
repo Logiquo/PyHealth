@@ -639,7 +639,7 @@ class StageAttentionNet(BaseModel, CheferInterpretable):
     def set_attention_hooks(self, enabled: bool) -> None:
         self._attention_hooks_enabled = enabled
 
-    def get_attention_layers(
+    def get_attention_values(
         self,
     ) -> dict[str, list[tuple[torch.Tensor, torch.Tensor]]]:
         return {  # type: ignore[return-value]

@@ -388,10 +388,12 @@ class CheferInterpretable(Interpretable):
         ...
 
     @abstractmethod
-    def get_attention_layers(
+    def get_attention_values(
         self,
     ) -> dict[str, list[tuple[torch.Tensor, torch.Tensor]]]:
         """Return (attention_map, attention_gradient) pairs for all feature keys.
+        The attention maps for each feature key should be ordered from the first 
+        (closest to input) to the last (closest to output) attention layer.
 
         Must be called **after** ``set_attention_hooks(True)``,
         a ``forward()`` call, and a subsequent ``backward()`` call so
@@ -418,7 +420,7 @@ class CheferInterpretable(Interpretable):
         --------
         A model with stacked ``TransformerBlock`` layers per feature key:
 
-        >>> def get_attention_layers(self):
+        >>> def get_attention_values(self):
         ...     return {
         ...         key: [
         ...             (blk.attention.get_attn_map(),
@@ -430,12 +432,38 @@ class CheferInterpretable(Interpretable):
 
         A model with a single MHA layer per feature key:
 
-        >>> def get_attention_layers(self):
+        >>> def get_attention_values(self):
         ...     return {
         ...         key: [(self.stagenet[key].get_attn_map(),
         ...                self.stagenet[key].get_attn_grad())]
         ...         for key in self.feature_keys
         ...     }
+        """
+        ...
+    
+    @abstractmethod
+    def get_attention_modules(self) -> dict[str, list[nn.Module]]:
+        """Return attention modules for each feature key. The order of modules should match the order 
+        of (attn_map, attn_grad) pairs returned by ``get_attention_values``.
+
+        Returns
+        -------
+        dict[str, list[nn.Module]]
+            A dictionary keyed by ``feature_keys``.  Each value is a list
+            of attention modules in the same order as they appear in the model.
+        """
+        ...
+    
+    @abstractmethod
+    def set_attention_modules(self, modules: dict[str, list[nn.Module]]) -> None:
+        """Set attention modules for each feature key. This is used to replace the original attention 
+        modules with wrapped versions that capture attention maps and gradients.
+
+        Parameters
+        ----------
+        modules : dict[str, list[nn.Module]]
+            A dictionary keyed by ``feature_keys``.  Each value is a list
+            of attention modules in the same order as they appear in the model.
         """
         ...
 

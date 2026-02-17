@@ -179,7 +179,7 @@ class CheferRelevance(BaseInterpreter):
         scalar.backward(retain_graph=True)
 
         # --- 3. Retrieve (attn_map, attn_grad) pairs per feature key ---
-        attention_layers = self.model.get_attention_layers()
+        attention_layers = self.model.get_attention_values()
 
         batch_size = logits.shape[0]
         device = logits.device
