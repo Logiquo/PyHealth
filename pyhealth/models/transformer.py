@@ -605,6 +605,21 @@ class Transformer(BaseModel, CheferInterpretable):
             for key in self.feature_keys
         }
 
+    def get_attention_modules(self) -> dict[str, list[nn.Module]]:
+        return {
+            key: [
+                cast(TransformerBlock, blk).attention
+                for blk in cast(TransformerLayer, self.transformer[key]).transformer
+            ]
+            for key in self.feature_keys
+        }
+
+    def set_attention_modules(self, modules: dict[str, list[nn.Module]]) -> None:
+        for key, module_list in modules.items():
+            blocks = cast(TransformerLayer, self.transformer[key]).transformer
+            for blk, module in zip(blocks, module_list):
+                cast(TransformerBlock, blk).attention = cast(MultiHeadedAttention, module)
+
     def get_relevance_tensor(
         self,
         R: dict[str, torch.Tensor],
