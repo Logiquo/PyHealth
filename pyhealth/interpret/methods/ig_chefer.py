@@ -80,33 +80,13 @@ class CheferWeightedIntegratedGradient(BaseInterpreter):
         self.chefer.set_relevance_hooks(False)
 
         # Step 2. Swap in Chefer-weighted backward rule for attention layers
-        #
-        # For each feature key, convert the Chefer relevance matrix R
-        # (shape [batch, seq, seq]) into a per-query-position weight that
-        # scales gradients flowing back through each attention module:
-        #
-        #   w = softmax(R.flatten(-2) / T, dim=-1) * (seq * seq)
-        #
-        # The softmax re-distributes R as a probability over the (seq × seq)
-        # attention space; multiplying by numel = seq*seq restores scale so
-        # the expected weight per element is 1.0 (neutral for uniform R).
-        # We then reduce over the key dimension (mean) to obtain a
-        # per-query-position scalar weight [batch, seq, 1] that is broadcast
-        # against grad_output [batch, seq, hidden] inside the hook.
-        chefer_weights: dict[str, torch.Tensor] = {}
-        for key, r_list in R.items():
-            r = r_list[0].to(next(self.model.parameters()).device)  # [batch, seq, seq]
-            numel_per_sample = r.shape[-1] * r.shape[-2]            # seq * seq
-            w = F.softmax(r.flatten(-2) / self.temperature, dim=-1) * numel_per_sample
-            chefer_weights[key] = w.reshape_as(r).detach()          # [batch, seq, seq]
-
-        # Register backward hooks that multiply attention output gradients
-        # by the Chefer-derived per-query weight.
-
+        pass
+        
         # Step 3. Compute IG attributions with the modified backward rules
         attributions = self.ig.attribute(**kwargs) # type: ignore[call-arg]
 
         # Step 4. Clean up hooks
+        pass
 
         return attributions
         
