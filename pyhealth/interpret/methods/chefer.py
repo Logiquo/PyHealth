@@ -136,6 +136,22 @@ class CheferRelevance(BaseInterpreter):
         if not isinstance(model, CheferInterpretable):
             raise ValueError("Model must implement CheferInterpretable interface")
         self.model = model
+        self._relevance_hooks_enabled = False
+        self.relevance: dict[str, list[torch.Tensor]] = {}
+        
+    def set_relevance_hooks(self, enabled: bool):
+        """Enable or disable hooks needed for other Chefer-based methods 
+        to reuse this implementation.
+        
+        This will store the R relevance matrices in the model 
+        layer by layer, which can be accessed by other methods that implement the
+        CheferInterpretable interface. This allows other methods to reuse the
+        same relevance propagation flow without needing to re-implement it.
+
+        Args:
+            enabled (bool): If True, enable hooks; if False, disable them.
+        """
+        self._relevance_hooks_enabled = enabled
 
     def attribute(
         self,
@@ -197,6 +213,12 @@ class CheferRelevance(BaseInterpreter):
                 cam = avg_heads(cam, grad)
                 R = R + apply_self_attention_rules(R, cam).detach()
             R_dict[key] = R
+            
+            if self._relevance_hooks_enabled:
+                if key not in self.relevance:
+                    self.relevance[key] = []
+                # Save it in CPU memory to avoid GPU memory issues for large models/datasets
+                self.relevance[key].append(R.detach().cpu())
 
         # --- 5. Reduce R matrices to per-token vectors ---
         attributions = self.model.get_relevance_tensor(R_dict, **data)
