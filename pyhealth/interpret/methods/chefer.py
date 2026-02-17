@@ -204,12 +204,16 @@ class CheferRelevance(BaseInterpreter):
         R_dict: dict[str, torch.Tensor] = {}
         for key, layers in attention_layers.items():
             num_tokens = layers[0][0].shape[-1]
-            R = (
-                torch.eye(num_tokens, device=device)
-                .unsqueeze(0)
-                .repeat(batch_size, 1, 1)
-            )
+
             if self._relevance_hooks_enabled:
+                num_heads = layers[0][0].shape[1]
+                R = (
+                    torch.eye(num_tokens, device=device)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .repeat(batch_size, num_heads, 1, 1)
+                )
+            
                 self.relevance[key] = []
                 for cam, grad in layers:
                     # We save the relevance at each layer and each head,
@@ -222,6 +226,11 @@ class CheferRelevance(BaseInterpreter):
                 # scores are stored in self.relevance for other methods to use.
                 return {} 
             else:
+                R = (
+                    torch.eye(num_tokens, device=device)
+                    .unsqueeze(0)
+                    .repeat(batch_size, 1, 1)
+                )
                 for cam, grad in layers:
                     cam = avg_heads(cam, grad)
                     R = R + apply_self_attention_rules(R, cam).detach()
