@@ -209,16 +209,23 @@ class CheferRelevance(BaseInterpreter):
                 .unsqueeze(0)
                 .repeat(batch_size, 1, 1)
             )
-            for cam, grad in layers:
-                cam = avg_heads(cam, grad)
-                R = R + apply_self_attention_rules(R, cam).detach()
-            R_dict[key] = R
-            
             if self._relevance_hooks_enabled:
-                if key not in self.relevance:
-                    self.relevance[key] = []
-                # Save it in CPU memory to avoid GPU memory issues for large models/datasets
-                self.relevance[key].append(R.detach().cpu())
+                self.relevance[key] = []
+                for cam, grad in layers:
+                    # We save the relevance at each layer and each head,
+                    # and also does not apply positive clamping.
+                    cam = grad * cam
+                    R = R + apply_self_attention_rules(R, cam).detach()
+                    self.relevance[key].append(R.detach().cpu())
+                
+                # If hooks are enabled, we return early since the relevance 
+                # scores are stored in self.relevance for other methods to use.
+                return {} 
+            else:
+                for cam, grad in layers:
+                    cam = avg_heads(cam, grad)
+                    R = R + apply_self_attention_rules(R, cam).detach()
+                R_dict[key] = R
 
         # --- 5. Reduce R matrices to per-token vectors ---
         attributions = self.model.get_relevance_tensor(R_dict, **data)
