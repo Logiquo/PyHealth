@@ -16,9 +16,10 @@ References:
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, cast
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 
 from pyhealth.models import BaseModel
@@ -27,7 +28,6 @@ from .base_interpreter import BaseInterpreter
 from pyhealth.interpret.api import Interpretable, CheferInterpretable
 from .chefer import CheferRelevance
 from .integrated_gradients import IntegratedGradients
-
 
 class CheferWeightedIntegratedGradient(BaseInterpreter):
     """Integrated Gradients with Chefer attention weights.
@@ -59,7 +59,7 @@ class CheferWeightedIntegratedGradient(BaseInterpreter):
         
         self.chefer = CheferRelevance(model)
         self.ig = IntegratedGradients(model, steps=steps)
-        self.model = model
+        self.model = cast(CheferInterpretable, model)
 
         self.temperature = max(float(temperature), 1.0)
         self.steps = steps
@@ -80,13 +80,98 @@ class CheferWeightedIntegratedGradient(BaseInterpreter):
         self.chefer.set_relevance_hooks(False)
 
         # Step 2. Swap in Chefer-weighted backward rule for attention layers
-        pass
+        old_modules = self.model.get_attention_modules()
+        modules: dict[str, list[nn.Module]] = {
+            key: [
+                CheferWeightedMHA(r, attention, temperature=self.temperature)
+                for r, attention 
+                in zip(R[key], attentions)
+            ]
+            for key, attentions
+            in old_modules.items()
+        }
+        self.model.set_attention_modules(modules)
         
         # Step 3. Compute IG attributions with the modified backward rules
         attributions = self.ig.attribute(**kwargs) # type: ignore[call-arg]
 
         # Step 4. Clean up hooks
-        pass
+        self.model.set_attention_modules(old_modules)
 
         return attributions
+
+class CheferWeightedMHA(nn.Module):
+    """Drop-in replacement for MultiHeadedAttention.
+    
+    Uses precomputed Chefer relevance matrix instead of softmax(QK^T/sqrt(d)).
+    Gradients flow through V projection and output projection normally.
+    Q and K projections are skipped entirely.
+    """
+    
+    def __init__(self, weight: torch.Tensor, mha: nn.Module, temperature: float = 1.0):
+        """
+        Args:
+            weight: [batch, heads, seq_len, seq_len] 
+                    Precomputed, softmax-normalized Chefer relevance.
+                    Treated as a fixed constant (no grad).
+            mha: Original MultiHeadedAttention module.
+                 We reuse its V projection and output projection.
+            temperature: Optional scaling factor for the Chefer weights.
+                         Values > 1 flatten the distribution, counteracting
+                         gradient suppression.  Default is 1.0 (no scaling).
+        """
+        super().__init__()
+        from pyhealth.models.transformer import MultiHeadedAttention
         
+        if not isinstance(mha, MultiHeadedAttention):
+            raise ValueError("Unsupported MultiHeadedAttention module.")
+        
+        self.weight = weight.detach()  # ensure it's treated as a fixed constant
+        self.temperature = temperature
+
+        # Copy from MHA
+        self.V = mha.linear_layers[2]  # V projection
+        self.d_k = mha.d_k
+        self.h = mha.h
+        self.output_linear = mha.output_linear
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        register_hook: bool = False,
+    ) -> torch.Tensor:
+        """Run multi-head attention with optional gradient capture.
+
+        Args:
+            query: Query tensor ``[batch, len_q, hidden]`` or similar.
+            key: Key tensor aligned with ``query``.
+            value: Value tensor aligned with ``query``.
+            mask: Optional boolean mask ``[batch, len_q, len_k]``.
+            register_hook: True to attach a backward hook saving gradients.
+
+        Returns:
+            torch.Tensor: Attention mixed representation ``[batch, len_q, hidden]``.
+        """
+        batch_size = value.size(0)
+
+        # Step 1: V projection only (Q, K are ignored)
+        v = self.V(value).view(batch_size, -1, self.h, self.d_k).transpose(1, 2)
+        # v: [batch, heads, seq_len, d_k]
+
+        # Step 2: Apply mask to Chefer weight, then softmax
+        w = self.weight  # [batch, heads, seq_len, seq_len] (raw, pre-softmax)
+        if mask is not None:
+            mask = mask.unsqueeze(1)  # [batch, 1, seq, seq] for head broadcast
+            w = w.masked_fill(mask == 0, -1e9)
+        w = F.softmax(w / self.temperature, dim=-1)
+
+        x = torch.matmul(w, v)
+
+        # Step 3: Concat heads and output projection (same as original MHA)
+        x = x.transpose(1, 2).contiguous().view(
+            batch_size, -1, self.h * self.d_k
+        )
+        return self.output_linear(x)
