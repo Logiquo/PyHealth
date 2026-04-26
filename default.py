@@ -10,6 +10,8 @@ import numpy as np
 import torch
 
 from pyhealth.datasets import MIMIC4Dataset, get_dataloader, split_by_patient
+from pyhealth.medcode import CrossMap
+from pyhealth.medcode.utils import MODULE_CACHE_PATH
 from pyhealth.models import AdaCare, GAMENet, RETAIN, RNN
 from pyhealth.tasks import (
     DrugRecommendationMIMIC4,
@@ -154,8 +156,26 @@ def get_device() -> str:
     return f"cuda:{cuda_index}"
 
 
+def prepare_drug_mapping_cache() -> None:
+    mapping_path = Path(MODULE_CACHE_PATH) / "NDC_to_ATC.csv"
+    pickle_path = Path(MODULE_CACHE_PATH) / "NDC_to_ATC.pkl"
+    refresh_cache = (
+        not mapping_path.exists()
+        or mapping_path.stat().st_size == 0
+        or (pickle_path.exists() and pickle_path.stat().st_size == 0)
+    )
+    if refresh_cache:
+        print("Refreshing NDC-to-ATC mapping cache...")
+    else:
+        print("Preloading NDC-to-ATC mapping cache...")
+    CrossMap.load("NDC", "ATC", refresh_cache=refresh_cache)
+
+
 def load_sample_dataset(task_code: str):
     task_cfg = TASKS[task_code]
+    if task_code == "dr":
+        prepare_drug_mapping_cache()
+
     print("Loading MIMIC-IV dataset...")
     base_dataset = MIMIC4Dataset(
         ehr_root=MIMIC4_ROOT,
