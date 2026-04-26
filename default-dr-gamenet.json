@@ -1,0 +1,44 @@
+{
+    "task": "dr",
+    "model": "gamenet",
+    "runs": [
+        {
+            "experiment": 0,
+            "pr_auc_samples": {
+                "avg": 0.6784095112791788,
+                "std": 0.003391810939633162
+            },
+            "jaccard_samples": {
+                "avg": 0.41399387403673665,
+                "std": 0.0038752529980890784
+            },
+            "seeds": [
+                {
+                    "seed": 0,
+                    "pr_auc_samples": 0.6800035780715356,
+                    "jaccard_samples": 0.4142824315346067
+                },
+                {
+                    "seed": 1,
+                    "pr_auc_samples": 0.6800494197711697,
+                    "jaccard_samples": 0.41665376543260024
+                },
+                {
+                    "seed": 2,
+                    "pr_auc_samples": 0.6787061350909778,
+                    "jaccard_samples": 0.41461640125661137
+                },
+                {
+                    "seed": 3,
+                    "pr_auc_samples": 0.671849891770157,
+                    "jaccard_samples": 0.40667818860609667
+                },
+                {
+                    "seed": 4,
+                    "pr_auc_samples": 0.6814385316920535,
+                    "jaccard_samples": 0.4177385833537682
+                }
+            ]
+        }
+    ]
+}
