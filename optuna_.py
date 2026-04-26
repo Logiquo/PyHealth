@@ -246,6 +246,29 @@ def write_output(task_code: str, model_code: str, runs: List[Dict[str, Any]]) ->
     print(f"Wrote results to {output_path}")
 
 
+def reset_output_file(task_code: str, model_code: str) -> None:
+    output_path = Path.cwd() / f"optuna-{task_code}-{model_code}.json"
+    if output_path.exists():
+        output_path.unlink()
+        print(f"Deleted existing Optuna result file: {output_path}")
+
+
+def reset_study(optuna: Any, study_name: str, storage_url: str) -> None:
+    try:
+        optuna.delete_study(study_name=study_name, storage=storage_url)
+    except Exception as exc:
+        message = str(exc).lower()
+        if (
+            "does not exist" in message
+            or "not found" in message
+            or "no such study" in message
+            or "record does not exist" in message
+        ):
+            return
+        raise
+    print(f"Deleted existing Optuna study: {study_name}")
+
+
 def main() -> None:
     args = parse_args()
     if args.exp <= 0:
@@ -255,18 +278,22 @@ def main() -> None:
     optuna = import_optuna()
     device = get_device()
     sample_dataset = load_sample_dataset(args.task)
-    runs: List[Dict[str, Any]] = []
     storage_path = Path.cwd() / "output" / "optuna" / "optuna.db"
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     storage_url = f"sqlite:///{storage_path}"
     study_name = f"{args.task}-{args.model}"
+    runs: List[Dict[str, Any]] = []
+
+    reset_study(optuna, study_name, storage_url)
+    reset_output_file(args.task, args.model)
 
     def objective(trial: Any) -> float:
         train_cfg = suggest_train_config(trial, args.model)
         seed_results = []
+        experiment = trial.number
 
         print("=" * 80)
-        print(f"Starting experiment {trial.number}: {trial.params}")
+        print(f"Starting experiment {experiment}: {trial.params}")
         for seed in SEEDS:
             metrics = run_seed(
                 sample_dataset=sample_dataset,
@@ -275,13 +302,18 @@ def main() -> None:
                 seed=seed,
                 device=device,
                 train_cfg=train_cfg,
-                experiment=trial.number,
+                experiment=experiment,
             )
             seed_result = {"seed": seed, **metrics}
             seed_results.append(seed_result)
-            print(f"Experiment {trial.number}, seed {seed} metrics: {metrics}")
+            print(f"Experiment {experiment}, seed {seed} metrics: {metrics}")
 
-        run = build_run(args.task, trial.number, seed_results, trial.params)
+        run = build_run(
+            args.task,
+            experiment,
+            seed_results,
+            trial.params,
+        )
         runs.append(run)
         write_output(args.task, args.model, runs)
 
@@ -295,7 +327,7 @@ def main() -> None:
         direction="maximize",
         storage=storage_url,
         study_name=study_name,
-        load_if_exists=True,
+        load_if_exists=False,
     )
     study.optimize(objective, n_trials=args.exp)
 
