@@ -1,0 +1,44 @@
+{
+    "task": "dr",
+    "model": "rnn",
+    "runs": [
+        {
+            "experiment": 0,
+            "pr_auc_samples": {
+                "avg": 0.6981063134174494,
+                "std": 0.001851131682644831
+            },
+            "jaccard_samples": {
+                "avg": 0.4257616911662817,
+                "std": 0.002301789424317906
+            },
+            "seeds": [
+                {
+                    "seed": 0,
+                    "pr_auc_samples": 0.6969763225468745,
+                    "jaccard_samples": 0.42419531218978546
+                },
+                {
+                    "seed": 1,
+                    "pr_auc_samples": 0.7013887300049327,
+                    "jaccard_samples": 0.429773701188686
+                },
+                {
+                    "seed": 2,
+                    "pr_auc_samples": 0.6976473193764231,
+                    "jaccard_samples": 0.4268896153690951
+                },
+                {
+                    "seed": 3,
+                    "pr_auc_samples": 0.6959485343543069,
+                    "jaccard_samples": 0.42359805568642245
+                },
+                {
+                    "seed": 4,
+                    "pr_auc_samples": 0.6985706608047095,
+                    "jaccard_samples": 0.4243517713974194
+                }
+            ]
+        }
+    ]
+}

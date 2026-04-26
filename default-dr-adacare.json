@@ -1,0 +1,44 @@
+{
+    "task": "dr",
+    "model": "adacare",
+    "runs": [
+        {
+            "experiment": 0,
+            "pr_auc_samples": {
+                "avg": 0.7438849905372387,
+                "std": 0.0016426603429988873
+            },
+            "jaccard_samples": {
+                "avg": 0.4755113901188617,
+                "std": 0.0023129688209071603
+            },
+            "seeds": [
+                {
+                    "seed": 0,
+                    "pr_auc_samples": 0.7430386327334533,
+                    "jaccard_samples": 0.47416931002325624
+                },
+                {
+                    "seed": 1,
+                    "pr_auc_samples": 0.7468843135581484,
+                    "jaccard_samples": 0.4794379373907737
+                },
+                {
+                    "seed": 2,
+                    "pr_auc_samples": 0.744318431780206,
+                    "jaccard_samples": 0.4768520353137496
+                },
+                {
+                    "seed": 3,
+                    "pr_auc_samples": 0.7422405150502388,
+                    "jaccard_samples": 0.4734272027920332
+                },
+                {
+                    "seed": 4,
+                    "pr_auc_samples": 0.7429430595641467,
+                    "jaccard_samples": 0.4736704650744955
+                }
+            ]
+        }
+    ]
+}
