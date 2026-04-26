@@ -48,7 +48,10 @@ and `f1_micro` for drug recommendation.
 The input args are
 - `--task`: mp/los/dr
 - `--model`: rnn/retain/adacare/gamenet
-- `--cuda`: 0 to 7, the cuda device used for training
+
+The script should autodetect the CUDA device with the most free memory. If CUDA
+is unavailable or all visible CUDA devices are occupied, the script should print
+a message and exit without training.
 
 Write a script that train the models with 5 different seeds, save the result in `default-<task>-<model>.json` file in the workspace root directory. In the following format:
 ```

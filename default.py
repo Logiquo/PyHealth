@@ -1,6 +1,8 @@
 import argparse
 import json
 import random
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, cast
 
@@ -24,6 +26,7 @@ SEEDS = [0, 1, 2, 3, 4]
 NUM_WORKERS = 16
 DEFAULT_BATCH_SIZE = 128
 EARLY_STOPPING_PATIENCE = 5
+MIN_FREE_CUDA_MEMORY_FRACTION = 0.9
 
 
 TASKS = {
@@ -70,14 +73,6 @@ def parse_args() -> argparse.Namespace:
         required=True,
         choices=["rnn", "retain", "adacare", "gamenet"],
     )
-    parser.add_argument(
-        "--cuda",
-        required=True,
-        type=int,
-        choices=range(8),
-        metavar="{0,1,2,3,4,5,6,7}",
-        help="CUDA device index used for training.",
-    )
     return parser.parse_args()
 
 
@@ -90,12 +85,73 @@ def set_global_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def get_device(cuda_index: int) -> str:
-    if torch.cuda.is_available():
-        torch.cuda.set_device(cuda_index)
-        return f"cuda:{cuda_index}"
-    print("CUDA is not available; falling back to CPU.")
-    return "cpu"
+def get_occupied_cuda_indices() -> set[int] | None:
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid",
+                "--format=csv,noheader",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    occupied_indices: set[int] = set()
+    try:
+        occupied_uuids = {
+            line.strip().lower().removeprefix("gpu-")
+            for line in completed.stdout.splitlines()
+            if line.strip()
+        }
+        for index in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(index)
+            if props.uuid.lower().removeprefix("gpu-") in occupied_uuids:
+                occupied_indices.add(index)
+    except AttributeError:
+        return None
+    return occupied_indices
+
+
+def detect_cuda_index() -> int:
+    if not torch.cuda.is_available():
+        print("CUDA is not available. Exiting without training.")
+        sys.exit(1)
+
+    occupied_indices = get_occupied_cuda_indices()
+
+    candidates: list[tuple[int, int, int]] = []
+    for index in range(torch.cuda.device_count()):
+        if occupied_indices is not None and index in occupied_indices:
+            continue
+        try:
+            free_memory, total_memory = torch.cuda.mem_get_info(index)
+        except RuntimeError:
+            continue
+        if (
+            occupied_indices is None
+            and free_memory / total_memory < MIN_FREE_CUDA_MEMORY_FRACTION
+        ):
+            continue
+        candidates.append((free_memory, total_memory, index))
+
+    if not candidates:
+        print(
+            "All visible CUDA devices are occupied or below the free-memory "
+            "threshold. Exiting without training."
+        )
+        sys.exit(1)
+    return max(candidates)[2]
+
+
+def get_device() -> str:
+    cuda_index = detect_cuda_index()
+    torch.cuda.set_device(cuda_index)
+    print(f"Using cuda:{cuda_index}")
+    return f"cuda:{cuda_index}"
 
 
 def load_sample_dataset(task_code: str):
@@ -279,7 +335,7 @@ def main() -> None:
     args = parse_args()
     validate_pair(args.task, args.model)
 
-    device = get_device(args.cuda)
+    device = get_device()
     sample_dataset = load_sample_dataset(args.task)
 
     seed_results = []
