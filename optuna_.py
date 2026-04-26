@@ -256,6 +256,10 @@ def main() -> None:
     device = get_device()
     sample_dataset = load_sample_dataset(args.task)
     runs: List[Dict[str, Any]] = []
+    storage_path = Path.cwd() / "output" / "optuna" / "optuna.db"
+    storage_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_url = f"sqlite:///{storage_path}"
+    study_name = f"{args.task}-{args.model}"
 
     def objective(trial: Any) -> float:
         train_cfg = suggest_train_config(trial, args.model)
@@ -287,9 +291,16 @@ def main() -> None:
         )[TASKS[args.task]["monitor"]]
         return float(run[monitor_output_key]["avg"])
 
-    study = optuna.create_study(direction="maximize")
+    study = optuna.create_study(
+        direction="maximize",
+        storage=storage_url,
+        study_name=study_name,
+        load_if_exists=True,
+    )
     study.optimize(objective, n_trials=args.exp)
 
+    print(f"Optuna study database: {storage_path}")
+    print(f"Optuna study name: {study_name}")
     print(f"Best experiment: {study.best_trial.number}")
     print(f"Best value: {study.best_value:.6f}")
     print(f"Best params: {study.best_params}")
