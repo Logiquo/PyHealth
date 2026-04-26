@@ -94,4 +94,43 @@ The hyperparamter specification of task-model pairs are
 - dr-adacare: Hidden size = 128, Kernel size = 2, Dilation rates [1,3,5], Compression ratio = 4, Learning rate = 1e-3, Adam optimizer, Batch-size 128, Dropout rate = 0.5, Epochs = 30
 
 # Optuna Baseline
-TODO
+
+The input args are
+- `--task`: mp/los/dr
+- `--model`: rnn/retain/adacare/gamenet
+- `--exp`: a int to indicate the number of experiments we want to run
+
+The script should autodetect the CUDA device with the most free memory. If CUDA
+is unavailable or all visible CUDA devices are occupied, the script should print
+a message and exit without training.
+
+Write a script that train the models with 5 different seeds, save the result in `optuna-<task>-<model>.json` file in the workspace root directory. In the following format:
+```
+{
+    "task": "<the code of the task, e.g. mp>",
+    "model": "<the code of the model, e.g. rnn>",
+    "runs": [
+        {
+            "experiment": 0,
+            "auroc": { "avg": <the mean of all the seed runs>, "std": <the standard deviation of all the seed runs> },
+            "prauc": { ... same as auroc },
+            "seeds": [
+                {
+                    "seed": <the seed of the run, e.g. 0>,
+                    "auroc": <the auroc of this run>,
+                    "prauc": <the prauc of this run>
+                }
+            ]
+        },
+        // run experiments based on --exp args
+        ...
+    ]
+}
+```
+
+Use these output metric keys:
+- mp: `auroc`, `prauc`
+- los: `f1_macro`, `f1_micro`
+- dr: `pr_auc_samples`, `jaccard_samples`
+
+Use optuna to run hyperparameter tunning for each models, you should allow as much model hyperparamters as possible to be configurable using optuna. 
