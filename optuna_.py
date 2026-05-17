@@ -36,7 +36,12 @@ def parse_args() -> argparse.Namespace:
         "--exp",
         required=True,
         type=int,
-        help="Number of Optuna experiments/trials to run.",
+        help="Total number of Optuna experiments/trials to have after this run.",
+    )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Delete existing Optuna results/study before running.",
     )
     return parser.parse_args()
 
@@ -233,13 +238,49 @@ def build_run(
     return run
 
 
+def get_output_path(task_code: str, model_code: str) -> Path:
+    return Path.cwd() / f"optuna-{task_code}-{model_code}.json"
+
+
+def load_output(task_code: str, model_code: str) -> List[Dict[str, Any]]:
+    output_path = get_output_path(task_code, model_code)
+    if not output_path.exists():
+        return []
+
+    with output_path.open() as f:
+        output = json.load(f)
+
+    if output.get("task") != task_code or output.get("model") != model_code:
+        raise ValueError(
+            f"Existing Optuna output {output_path} is for "
+            f"{output.get('task')}-{output.get('model')}, not "
+            f"{task_code}-{model_code}."
+        )
+
+    runs = output.get("runs", [])
+    if not isinstance(runs, list):
+        raise ValueError(f"Existing Optuna output {output_path} has invalid runs.")
+
+    experiments = [int(run["experiment"]) for run in runs]
+    expected = list(range(len(experiments)))
+    if experiments != expected:
+        raise ValueError(
+            f"Existing Optuna output {output_path} has non-contiguous experiments "
+            f"{experiments}; expected {expected}. Please fix the JSON or use "
+            "--restart."
+        )
+
+    print(f"Loaded {len(runs)} completed Optuna result(s) from {output_path}")
+    return runs
+
+
 def write_output(task_code: str, model_code: str, runs: List[Dict[str, Any]]) -> None:
     output = {
         "task": task_code,
         "model": model_code,
         "runs": runs,
     }
-    output_path = Path.cwd() / f"optuna-{task_code}-{model_code}.json"
+    output_path = get_output_path(task_code, model_code)
     with output_path.open("w") as f:
         json.dump(output, f, indent=4)
         f.write("\n")
@@ -247,7 +288,7 @@ def write_output(task_code: str, model_code: str, runs: List[Dict[str, Any]]) ->
 
 
 def reset_output_file(task_code: str, model_code: str) -> None:
-    output_path = Path.cwd() / f"optuna-{task_code}-{model_code}.json"
+    output_path = get_output_path(task_code, model_code)
     if output_path.exists():
         output_path.unlink()
         print(f"Deleted existing Optuna result file: {output_path}")
@@ -282,18 +323,25 @@ def main() -> None:
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     storage_url = f"sqlite:///{storage_path}"
     study_name = f"{args.task}-{args.model}"
-    runs: List[Dict[str, Any]] = []
 
-    reset_study(optuna, study_name, storage_url)
-    reset_output_file(args.task, args.model)
+    if args.restart:
+        reset_study(optuna, study_name, storage_url)
+        reset_output_file(args.task, args.model)
+        runs: List[Dict[str, Any]] = []
+    else:
+        runs = load_output(args.task, args.model)
 
     def objective(trial: Any) -> float:
         train_cfg = suggest_train_config(trial, args.model)
         seed_results = []
-        experiment = trial.number
+        experiment = len(runs)
+        trial.set_user_attr("experiment", experiment)
 
         print("=" * 80)
-        print(f"Starting experiment {experiment}: {trial.params}")
+        print(
+            f"Starting experiment {experiment} "
+            f"(Optuna trial {trial.number}): {trial.params}"
+        )
         for seed in SEEDS:
             metrics = run_seed(
                 sample_dataset=sample_dataset,
@@ -327,13 +375,31 @@ def main() -> None:
         direction="maximize",
         storage=storage_url,
         study_name=study_name,
-        load_if_exists=False,
+        load_if_exists=not args.restart,
     )
-    study.optimize(objective, n_trials=args.exp)
+    if len(runs) >= args.exp:
+        print(
+            f"Already have {len(runs)} completed experiment(s); "
+            f"--exp requested {args.exp}. Nothing to run."
+        )
+    else:
+        remaining_trials = args.exp - len(runs)
+        print(
+            f"Resuming Optuna study {study_name}: {len(runs)} completed, "
+            f"{remaining_trials} remaining to reach {args.exp}."
+        )
+        study.optimize(objective, n_trials=remaining_trials)
 
     print(f"Optuna study database: {storage_path}")
     print(f"Optuna study name: {study_name}")
-    print(f"Best experiment: {study.best_trial.number}")
+    try:
+        best_trial = study.best_trial
+    except ValueError:
+        print("No completed Optuna trials found in the study database yet.")
+        return
+
+    best_experiment = best_trial.user_attrs.get("experiment", best_trial.number)
+    print(f"Best experiment: {best_experiment}")
     print(f"Best value: {study.best_value:.6f}")
     print(f"Best params: {study.best_params}")
 
