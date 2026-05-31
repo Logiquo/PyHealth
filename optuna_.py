@@ -22,6 +22,10 @@ from pyhealth.models import AdaCare, GAMENet, RETAIN, RNN
 from pyhealth.trainer import Trainer
 
 
+MAX_GRAD_NORM = 5.0
+MAX_OPTUNA_ATTEMPT_MULTIPLIER = 5
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Optuna-tuned MIMIC-IV PyHealth baselines."
@@ -110,6 +114,7 @@ def suggest_train_config(trial: Any, model_code: str) -> Dict[str, Any]:
     if model_code == "retain":
         return {
             **common,
+            "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
             "model_cls": RETAIN,
             "model_kwargs": {
                 "embedding_dim": trial.suggest_categorical(
@@ -141,6 +146,26 @@ def suggest_train_config(trial: Any, model_code: str) -> Dict[str, Any]:
         }
 
     raise ValueError(f"Unsupported model: {model_code}")
+
+
+def is_non_finite_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "nan" in message
+        or "inf" in message
+        or "infinite" in message
+        or "not finite" in message
+    )
+
+
+def validate_finite_metrics(metrics: Mapping[str, float]) -> None:
+    non_finite_metrics = {
+        metric_name: metric_value
+        for metric_name, metric_value in metrics.items()
+        if not np.isfinite(metric_value)
+    }
+    if non_finite_metrics:
+        raise FloatingPointError(f"Non-finite metrics: {non_finite_metrics}")
 
 
 def run_seed(
@@ -201,6 +226,7 @@ def run_seed(
         patience=EARLY_STOPPING_PATIENCE,
         optimizer_params={"lr": float(train_cfg["lr"])},
         weight_decay=float(train_cfg["weight_decay"]),
+        max_grad_norm=MAX_GRAD_NORM,
     )
 
     results = trainer.evaluate(test_loader)
@@ -343,15 +369,23 @@ def main() -> None:
             f"(Optuna trial {trial.number}): {trial.params}"
         )
         for seed in SEEDS:
-            metrics = run_seed(
-                sample_dataset=sample_dataset,
-                task_code=args.task,
-                model_code=args.model,
-                seed=seed,
-                device=device,
-                train_cfg=train_cfg,
-                experiment=experiment,
-            )
+            try:
+                metrics = run_seed(
+                    sample_dataset=sample_dataset,
+                    task_code=args.task,
+                    model_code=args.model,
+                    seed=seed,
+                    device=device,
+                    train_cfg=train_cfg,
+                    experiment=experiment,
+                )
+                validate_finite_metrics(metrics)
+            except (FloatingPointError, ValueError) as exc:
+                if is_non_finite_error(exc):
+                    raise optuna.TrialPruned(
+                        f"Pruned unstable trial with non-finite values: {exc}"
+                    ) from exc
+                raise
             seed_result = {"seed": seed, **metrics}
             seed_results.append(seed_result)
             print(f"Experiment {experiment}, seed {seed} metrics: {metrics}")
@@ -383,12 +417,22 @@ def main() -> None:
             f"--exp requested {args.exp}. Nothing to run."
         )
     else:
-        remaining_trials = args.exp - len(runs)
+        remaining_experiments = args.exp - len(runs)
         print(
             f"Resuming Optuna study {study_name}: {len(runs)} completed, "
-            f"{remaining_trials} remaining to reach {args.exp}."
+            f"{remaining_experiments} remaining to reach {args.exp}."
         )
-        study.optimize(objective, n_trials=remaining_trials)
+        max_attempts = remaining_experiments * MAX_OPTUNA_ATTEMPT_MULTIPLIER
+        attempts = 0
+        while len(runs) < args.exp and attempts < max_attempts:
+            attempts += 1
+            study.optimize(objective, n_trials=1)
+        if len(runs) < args.exp:
+            print(
+                f"Stopped after {attempts} Optuna trial attempt(s) with "
+                f"{len(runs)} completed experiment(s). The remaining sampled "
+                "trials were unstable or pruned."
+            )
 
     print(f"Optuna study database: {storage_path}")
     print(f"Optuna study name: {study_name}")
