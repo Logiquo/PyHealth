@@ -1,12 +1,23 @@
 import argparse
 import json
+import os
 import random
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, cast
 
 import numpy as np
+from nvitop import select_devices
+
+os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+    select_devices(
+        format="uuid",
+        min_count=1,
+        max_count=1,
+        min_free_memory="24GiB",
+    )
+)
+
 import torch
 
 from pyhealth.datasets import MIMIC4Dataset, get_dataloader, split_by_patient
@@ -28,9 +39,6 @@ SEEDS = [0, 1, 2, 3, 4]
 NUM_WORKERS = 16
 DEFAULT_BATCH_SIZE = 128
 EARLY_STOPPING_PATIENCE = 5
-MIN_FREE_CUDA_MEMORY_FRACTION = 0.7
-
-
 TASKS = {
     "mp": {
         "task_cls": MortalityPredictionMIMIC4,
@@ -85,75 +93,6 @@ def set_global_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-
-def get_occupied_cuda_indices() -> set[int] | None:
-    try:
-        completed = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-compute-apps=gpu_uuid",
-                "--format=csv,noheader",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
-
-    occupied_indices: set[int] = set()
-    try:
-        occupied_uuids = {
-            line.strip().lower().removeprefix("gpu-")
-            for line in completed.stdout.splitlines()
-            if line.strip()
-        }
-        for index in range(torch.cuda.device_count()):
-            props = torch.cuda.get_device_properties(index)
-            if props.uuid.lower().removeprefix("gpu-") in occupied_uuids:
-                occupied_indices.add(index)
-    except AttributeError:
-        return None
-    return occupied_indices
-
-
-def detect_cuda_index() -> int:
-    if not torch.cuda.is_available():
-        print("CUDA is not available. Exiting without training.")
-        sys.exit(1)
-
-    occupied_indices = get_occupied_cuda_indices()
-
-    candidates: list[tuple[int, int, int]] = []
-    for index in range(torch.cuda.device_count()):
-        if occupied_indices is not None and index in occupied_indices:
-            continue
-        try:
-            free_memory, total_memory = torch.cuda.mem_get_info(index)
-        except RuntimeError:
-            continue
-        if (
-            occupied_indices is None
-            and free_memory / total_memory < MIN_FREE_CUDA_MEMORY_FRACTION
-        ):
-            continue
-        candidates.append((free_memory, total_memory, index))
-
-    if not candidates:
-        print(
-            "All visible CUDA devices are occupied or below the free-memory "
-            "threshold. Exiting without training."
-        )
-        sys.exit(1)
-    return max(candidates)[2]
-
-
-def get_device() -> str:
-    cuda_index = detect_cuda_index()
-    torch.cuda.set_device(cuda_index)
-    print(f"Using cuda:{cuda_index}")
-    return f"cuda:{cuda_index}"
 
 
 def prepare_drug_mapping_cache() -> None:
@@ -355,7 +294,13 @@ def main() -> None:
     args = parse_args()
     validate_pair(args.task, args.model)
 
-    device = get_device()
+    if not torch.cuda.is_available():
+        print("CUDA is not available. Exiting without training.")
+        sys.exit(1)
+    torch.cuda.set_device(0)
+    print(f"CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+    print("Using cuda:0")
+    device = "cuda:0"
     sample_dataset = load_sample_dataset(args.task)
 
     seed_results = []

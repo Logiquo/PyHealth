@@ -1,6 +1,7 @@
 import argparse
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, cast
@@ -12,11 +13,11 @@ from default import (
     SEEDS,
     SPLIT_RATIOS,
     TASKS,
-    get_device,
     load_sample_dataset,
     set_global_seed,
     validate_pair,
 )
+import torch
 from pyhealth.datasets import get_dataloader, split_by_patient
 from pyhealth.models import AdaCare, GAMENet, RETAIN, RNN
 from pyhealth.trainer import Trainer
@@ -343,7 +344,13 @@ def main() -> None:
     validate_pair(args.task, args.model)
 
     optuna = import_optuna()
-    device = get_device()
+    if not torch.cuda.is_available():
+        print("CUDA is not available. Exiting without training.")
+        sys.exit(1)
+    torch.cuda.set_device(0)
+    print(f"CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+    print("Using cuda:0")
+    device = "cuda:0"
     sample_dataset = load_sample_dataset(args.task)
     storage_path = Path.cwd() / "output" / "optuna" / "optuna.db"
     storage_path.parent.mkdir(parents=True, exist_ok=True)
