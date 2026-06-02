@@ -55,8 +55,8 @@ TASKS = {
     "dr": {
         "task_cls": DrugRecommendationMIMIC4,
         "allowed_models": {"rnn", "gamenet", "adacare"},
-        "metrics": ["f1_micro", "pr_auc_samples", "jaccard_samples"],
-        "monitor": "f1_micro",
+        "metrics": ["pr_auc_samples", "jaccard_samples"],
+        "monitor": "pr_auc_samples",
         "metric_output_keys": {
             "pr_auc_samples": "pr_auc_samples",
             "jaccard_samples": "jaccard_samples",
