@@ -202,3 +202,14 @@ def set_env(**environ):
     finally:
         os.environ.clear()
         os.environ.update(old_environ)
+
+def chunked(items, size: int):
+    """Splits ``items`` into consecutive lists of at most ``size`` elements.
+
+    >>> chunked([1, 2, 3, 4, 5], 2)
+    [[1, 2], [3, 4], [5]]
+    """
+    if size <= 0:
+        raise ValueError(f"size must be positive, got {size}")
+    items = list(items)
+    return [items[i : i + size] for i in range(0, len(items), size)]
