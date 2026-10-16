@@ -207,12 +207,32 @@ def test_state_roundtrip_and_embedding(tmp_path):
     if isinstance(x, tuple):
         x = x[0]
     assert torch.equal(
-        model.forward_from_embedding(x, **batch)["loss"], expected["loss"]
+        model.forward_from_embedding(**{**batch, "features": x})["loss"],
+        expected["loss"],
     )
     with torch.no_grad():
         assert torch.equal(
             model.predict_survival(x, model.time_grid), expected["y_prob"]
         )
+
+
+def test_predict_survival_uses_eval_mode_and_restores_it():
+    model = SurvivalMDN(_make_dataset(), hidden_dim=4, num_components=2)
+    model.train()
+    buffers_before = [b.clone() for b in model.buffers()]
+    x = torch.randn(3, 4)
+    with torch.no_grad():
+        from_train_mode = model.predict_survival(x, model.time_grid)
+    assert model.training
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(buffers_before, model.buffers())
+    )
+    model.eval()
+    with torch.no_grad():
+        from_eval_mode = model.predict_survival(x, model.time_grid)
+    assert not model.training
+    assert torch.equal(from_train_mode, from_eval_mode)
 
 
 def test_missing_and_mismatched_fields():

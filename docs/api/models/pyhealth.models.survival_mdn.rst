@@ -31,8 +31,10 @@ evaluate other times. ``reference_initialization`` is off by default; it starts
 the mixture heads from the configuration used in the SUPPORT experiments, and
 the SUPPORT example turns it on.
 
-Use ``model.eval()`` and ``torch.no_grad()`` for ``predict_survival``. The method
-preserves the caller's training/evaluation mode. BatchNorm requires at least two
+``predict_survival`` always runs in evaluation mode, so BatchNorm uses its running
+statistics without updating them, and it restores the caller's training/evaluation
+mode afterwards; wrap it in ``torch.no_grad()`` when gradients aren't needed.
+BatchNorm requires at least two
 samples per training minibatch. ``mode=None`` is intentional: use the custom
 survival loop and metrics, not PyHealth's classification metric dispatcher.
 

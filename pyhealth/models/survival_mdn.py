@@ -196,15 +196,6 @@ class _SurvivalMDNDistribution:
             result = result + self.time_transform.log_abs_det_inverse_jacobian(time)
         return result
 
-    def log_cdf(self, time: Tensor) -> Tensor:
-        """Return the stable log CDF."""
-        z = self._standardized_latent(time)
-        component_log_cdf = torch.special.log_ndtr(z)
-        return torch.logsumexp(
-            self.params.log_weights + component_log_cdf,
-            dim=-1,
-        )
-
     def log_survival(self, time: Tensor) -> Tensor:
         """Return stable ``log S(time | x)`` without ``1 - CDF`` cancellation."""
         z = self._standardized_latent(time)
@@ -557,11 +548,15 @@ class SurvivalMDN(BaseModel):
 
     def forward_from_embedding(
         self,
-        embeddings: Tensor,
         **kwargs: Tensor | tuple[Tensor, ...],
     ) -> dict[str, Tensor]:
-        """Run ``forward`` with dense features supplied directly."""
-        kwargs[self.feature_key] = embeddings
+        """Run ``forward`` with the dense features supplied as embeddings.
+
+        Follows PyHealth's interpretability contract: inputs are keyword
+        arguments keyed by feature name, so ``kwargs[feature_key]`` holds the
+        dense feature vectors. The features are already dense, so this is the
+        same computation as ``forward``.
+        """
         return self.forward(**kwargs)
 
     def predict_survival(
@@ -577,6 +572,10 @@ class SurvivalMDN(BaseModel):
 
         Returns:
             Survival probabilities with shape ``[batch, num_times]``.
+
+        The prediction always runs in evaluation mode, so BatchNorm uses its
+        running statistics and never updates them. The caller's
+        training/evaluation mode is restored afterwards.
         """
         features = torch.as_tensor(
             features,
@@ -588,5 +587,10 @@ class SurvivalMDN(BaseModel):
             dtype=torch.float32,
             device=self.device,
         )
-        params = self.network.mixture_parameters(features)
-        return self.network.survival_at(params, times)
+        was_training = self.training
+        self.eval()
+        try:
+            params = self.network.mixture_parameters(features)
+            return self.network.survival_at(params, times)
+        finally:
+            self.train(was_training)
