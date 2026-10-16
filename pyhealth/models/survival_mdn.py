@@ -483,32 +483,26 @@ class SurvivalMDN(BaseModel):
             and the fitted mixture weights, means, and scales. ``y_prob`` is
             the survival curve evaluated on ``self.time_grid``.
         """
-        missing = [
-            key
-            for key in (self.feature_key, self.duration_key, self.event_key)
-            if key not in kwargs
-        ]
+        return self._run(kwargs, require_labels=True)
+
+    def _run(
+        self,
+        kwargs: dict[str, Tensor | tuple[Tensor, ...]],
+        require_labels: bool,
+    ) -> dict[str, Tensor]:
+        """Shared forward computation; labels may be omitted only when allowed."""
+        label_keys = (self.duration_key, self.event_key)
+        has_labels = require_labels or any(key in kwargs for key in label_keys)
+        required = (self.feature_key, *label_keys) if has_labels else (self.feature_key,)
+        missing = [key for key in required if key not in kwargs]
         if missing:
             raise KeyError(f"Missing required batch fields: {missing}")
 
-        features = _value_tensor(kwargs[self.feature_key])
-        duration = _value_tensor(kwargs[self.duration_key])
-        event = _value_tensor(kwargs[self.event_key])
         features = torch.as_tensor(
-            features,
+            _value_tensor(kwargs[self.feature_key]),
             dtype=torch.float32,
             device=self.device,
         )
-        duration = torch.as_tensor(
-            duration,
-            dtype=torch.float32,
-            device=self.device,
-        ).reshape(-1)
-        event = torch.as_tensor(
-            event,
-            dtype=torch.float32,
-            device=self.device,
-        ).reshape(-1)
         if features.ndim != 2 or features.shape[1] != self.input_dim:
             raise ValueError(
                 "features must have shape [batch, input_dim]; "
@@ -520,14 +514,6 @@ class SurvivalMDN(BaseModel):
 
         # Compute the BatchNorm-containing feature network once per batch.
         params = self.network.mixture_parameters(features)
-        loss = self.network.censored_nll(
-            params,
-            duration,
-            event,
-            include_jacobian=self.include_jacobian,
-        )
-        y_prob = self.network.survival_at(params, self.time_grid)
-        y_true = torch.stack([duration, event], dim=-1)
         logit = torch.cat(
             [
                 params.raw_weight_logits,
@@ -536,28 +522,46 @@ class SurvivalMDN(BaseModel):
             ],
             dim=-1,
         )
-        return {
-            "loss": loss,
+        result = {
             "logit": logit,
-            "y_prob": y_prob,
-            "y_true": y_true,
+            "y_prob": self.network.survival_at(params, self.time_grid),
             "mixture_weights": params.weights,
             "mixture_means": params.means,
             "mixture_scales": params.scales,
         }
+        if has_labels:
+            duration = torch.as_tensor(
+                _value_tensor(kwargs[self.duration_key]),
+                dtype=torch.float32,
+                device=self.device,
+            ).reshape(-1)
+            event = torch.as_tensor(
+                _value_tensor(kwargs[self.event_key]),
+                dtype=torch.float32,
+                device=self.device,
+            ).reshape(-1)
+            result["loss"] = self.network.censored_nll(
+                params,
+                duration,
+                event,
+                include_jacobian=self.include_jacobian,
+            )
+            result["y_true"] = torch.stack([duration, event], dim=-1)
+        return result
 
     def forward_from_embedding(
         self,
         **kwargs: Tensor | tuple[Tensor, ...],
     ) -> dict[str, Tensor]:
-        """Run ``forward`` with the dense features supplied as embeddings.
+        """Run the model with the dense features supplied as embeddings.
 
         Follows PyHealth's interpretability contract: inputs are keyword
         arguments keyed by feature name, so ``kwargs[feature_key]`` holds the
-        dense feature vectors. The features are already dense, so this is the
-        same computation as ``forward``.
+        dense feature vectors. The duration and event labels are optional:
+        without them the loss is skipped, and ``loss`` and ``y_true`` are left
+        out of the result.
         """
-        return self.forward(**kwargs)
+        return self._run(kwargs, require_labels=False)
 
     def predict_survival(
         self,

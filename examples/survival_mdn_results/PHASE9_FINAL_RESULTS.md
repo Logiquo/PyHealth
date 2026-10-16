@@ -1,5 +1,9 @@
 # Phase 9 — Final Experimental Results
 
+All results in this file were produced by the project's standalone Survival
+MDN implementation, which is not part of this pull request. They have not
+been re-run with `pyhealth.models.SurvivalMDN`.
+
 ## 1. Reproduction of published SUPPORT results
 
 The Phase-4 reproduction uses the exact recovered SODEN patient memberships and the
@@ -90,7 +94,7 @@ censoring horizons:
 
 ## 6. Recommended final-result statement
 
-> The PyHealth Survival MDN reproduction closely matched the published SUPPORT
+> The standalone Survival MDN reproduction closely matched the published SUPPORT
 > results, particularly for integrated Brier score and integrated binomial
 > log-likelihood. In a controlled 100-run ablation, replacing the paper's softplus
 > positive-time transformation with an exponential transformation improved held-out
