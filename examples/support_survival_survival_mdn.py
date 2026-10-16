@@ -75,6 +75,7 @@ def train(
         num_components=10,
         time_transform=transform,
         time_grid=torch.tensor([1.0]),
+        reference_initialization=True,
     )
     opt = torch.optim.RMSprop(model.parameters(), lr=0.001, weight_decay=1e-6)
     x, t, e = tensors(bundle.train, sort=True)

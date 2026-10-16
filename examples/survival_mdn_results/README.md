@@ -4,7 +4,7 @@ Option 2 model contribution for [Survival Mixture Density Networks](https://proc
 
 ## Recorded results
 
-The supplied `all_runs.csv` contains 10 exact SUPPORT splits × 5 paired seeds × 2 transformations = **100 runs**. These are the completed Phases 6–8 results from the standalone model core, not newly generated outputs from the final PyHealth example. Phase 9 provides the final tables and figures. The companion bundle preserves the source, data, run histories and reproduction checkpoints supplied by the user.
+The supplied `all_runs.csv` contains 10 exact SUPPORT splits × 5 paired seeds × 2 transformations = **100 runs**. They were produced by a separate standalone implementation of the model, which is not part of this pull request, and have not been re-run with the PyHealth model in `pyhealth/models/survival_mdn.py`. Phase 9 provides the final tables and figures. The standalone source, data, run histories and checkpoints are kept in a companion bundle outside this repository.
 
 | Metric | Softplus | Exponential | Exp minus softplus | Split-level 95% interval |
 |---|---:|---:|---:|---:|
@@ -60,7 +60,7 @@ python examples/support_survival_survival_mdn.py --source benchmark --data /path
 
 This evaluates all horizons for all seeds, extending evaluation beyond the historical seed-1-only secondary horizons. Training otherwise follows the same recipe. Use `--splits 1 --seeds 1 --epochs 2 --metrics nll` for a quick smoke run. Choose a fresh output directory; previous results are not overwritten. Numerical differences across dependency versions and hardware can occur.
 
-For a completed width-32 100-run experiment, run the companion `reproduction/summarize_phase6.py --results /tmp/mdn_benchmark` to regenerate paired statistics. Do not include `--vary-hidden` in that 100-run command.
+For a completed width-32 100-run experiment, paired statistics can be regenerated with `reproduction/summarize_phase6.py --results /tmp/mdn_benchmark` from the companion bundle, which is not part of this repository. Do not include `--vary-hidden` in that 100-run command.
 
 ## Manual acceptance checks
 

@@ -3,8 +3,9 @@
 
 This module implements Survival MDN from Han, Goldstein, and Ranganath,
 "Survival Mixture Density Networks" (MLHC 2022). The implementation is
-written from the paper's equations and validated against the released
-SUPPORT benchmark behavior; it is not copied from the authors' repository.
+written from the paper's equations; it is not copied from the authors'
+repository. The SUPPORT results recorded in examples/survival_mdn_results come
+from a separate standalone implementation, not from this module.
 
 Paper: https://proceedings.mlr.press/v182/han22a.html
 """
@@ -116,6 +117,29 @@ def _value_tensor(value: Tensor | tuple[Tensor, ...]) -> Tensor:
     if isinstance(value, tuple):
         return value[0]
     return value
+
+
+def _infer_time_grid(
+    dataset: SampleDataset, duration_key: str, num_points: int = 128
+) -> Tensor:
+    """Span the dataset's observed durations with an evenly spaced grid."""
+    durations = []
+    for index in range(len(dataset)):
+        value = dataset[index][duration_key]
+        if isinstance(value, tuple):
+            value = value[0]
+        durations.append(torch.as_tensor(value, dtype=torch.float32).reshape(-1))
+    values = torch.cat(durations) if durations else torch.empty(0)
+    values = values[torch.isfinite(values) & (values > 0)]
+    if values.numel() == 0:
+        raise ValueError(
+            "Could not infer time_grid: the dataset has no positive finite "
+            "durations; pass time_grid explicitly."
+        )
+    low, high = values.min().item(), values.max().item()
+    if low == high:
+        return torch.tensor([low])
+    return torch.linspace(low, high, num_points)
 
 
 def _infer_input_dim(dataset: SampleDataset, feature_key: str) -> int:
@@ -361,13 +385,14 @@ class SurvivalMDN(BaseModel):
             paper baseline; ``"exp"`` is supported for ablation studies.
         min_scale: Minimum Gaussian standard deviation for numerical safety.
         time_grid: Times at which ``y_prob`` returns survival probabilities.
-            If omitted, a 128-point grid from 0.001 to 5.6 is used.
+            If omitted, 128 evenly spaced points from the shortest to the
+            longest duration in ``dataset``.
         include_jacobian: Whether event-density likelihoods include the
             transformation Jacobian. Keep this ``True`` when comparing
             different time transformations.
         reference_initialization: If ``True``, initialize the three mixture
-            heads to the reference SUPPORT configuration used in the project
-            reproduction.
+            heads to the configuration used in the SUPPORT reproduction:
+            equal weights and means spread over [-3, 3]. Off by default.
 
     Examples:
         >>> from pyhealth.datasets import create_sample_dataset
@@ -413,7 +438,7 @@ class SurvivalMDN(BaseModel):
         min_scale: float = 1e-8,
         time_grid: Tensor | None = None,
         include_jacobian: bool = True,
-        reference_initialization: bool = True,
+        reference_initialization: bool = False,
     ) -> None:
         super().__init__(dataset)
         self.feature_key = feature_key
@@ -446,7 +471,7 @@ class SurvivalMDN(BaseModel):
         if reference_initialization:
             self.network.initialize_reference_heads()
         if time_grid is None:
-            time_grid = torch.linspace(0.001, 5.6, 128)
+            time_grid = _infer_time_grid(dataset, duration_key)
         time_grid = torch.as_tensor(time_grid, dtype=torch.float32)
         _validate_positive_time(time_grid)
         self.register_buffer("time_grid", time_grid.reshape(-1))
