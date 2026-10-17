@@ -1,10 +1,10 @@
 # Survival MDN SUPPORT reproduction and ablation
 
-Option 2 model contribution for [Survival Mixture Density Networks](https://proceedings.mlr.press/v182/han22a.html), Han, Goldstein and Ranganath (MLHC 2022). SUPPORT is the sole clinical dataset.
+Reproduction and transformation ablation for [Survival Mixture Density Networks](https://proceedings.mlr.press/v182/han22a.html), Han, Goldstein and Ranganath (MLHC 2022). SUPPORT is the sole clinical dataset.
 
 ## Recorded results
 
-The supplied `all_runs.csv` contains 10 exact SUPPORT splits × 5 paired seeds × 2 transformations = **100 runs**. These are the completed Phases 6–8 results from the standalone model core, not newly generated outputs from the final PyHealth example. Phase 9 provides the final tables and figures. The companion bundle preserves the source, data, run histories and reproduction checkpoints supplied by the user.
+The supplied `all_runs.csv` contains 10 exact SUPPORT splits × 5 paired seeds × 2 transformations = **100 runs**. They were produced by a separate standalone implementation of the model, which is not part of this pull request, and have not been re-run with the PyHealth model in `pyhealth/models/survival_mdn.py`. `FINAL_RESULTS.md` collects the tables and figures. The standalone source, data, run histories and checkpoints are kept in a companion bundle outside this repository.
 
 | Metric | Softplus | Exponential | Exp minus softplus | Split-level 95% interval |
 |---|---:|---:|---:|---:|
@@ -19,7 +19,7 @@ IBS is inconclusive. The intervals are descriptive paired t intervals over overl
 
 ## Ablation contribution
 
-Section 3.2 of the paper already identifies exponential as an alternative and motivates softplus through tail behavior. The project's extension is a controlled quantitative SUPPORT comparison of transformations, including predictive metrics, optimization and extrapolation. It does not claim to invent exponential mapping. The paper's appendix compares mixture base distributions; this is a different experiment. See [original paper](https://proceedings.mlr.press/v182/han22a/han22a.pdf). Final grading of novelty remains with the course staff.
+Section 3.2 of the paper already identifies exponential as an alternative and motivates softplus through tail behavior. This study adds a controlled quantitative SUPPORT comparison of transformations, including predictive metrics, optimization and extrapolation. It does not claim to invent exponential mapping. The paper's appendix compares mixture base distributions; this is a different experiment. See [original paper](https://proceedings.mlr.press/v182/han22a/han22a.pdf).
 
 ## Experimental setup
 
@@ -50,7 +50,7 @@ Use PyHealth's existing dataset with the supplied raw CSV:
 python examples/support_survival_survival_mdn.py --source support2 --data /path/to/bundle/data/support2_with_patient_id.csv --epochs 8 --vary-hidden --output /tmp/mdn_support2
 ```
 
-This reads records through `Support2Dataset`, then encodes and splits them. Without `--membership` it uses a reproducible random 70/15/15 split, so results are not expected to match the historical tables. Add the exact membership file to use recovered splits. The input must have explicit `sno` or `patient_id`; row identities are never guessed. Raw-mode outputs include an encoded CSV for inspection; keep patient-level outputs outside the PR.
+This reads records through `Support2Dataset`, then encodes and splits them. Without `--membership` it uses a reproducible random 70/15/15 split, so results are not expected to match the historical tables. Add the exact membership file to use recovered splits. The input must have explicit `sno` or `patient_id`; row identities are never guessed. Add `--save-prepared` to also write the encoded patient-level table for inspection; keep patient-level outputs out of version control.
 
 Full paired experiment with the native PyHealth model:
 

@@ -1,11 +1,17 @@
 # Contributor: Neil Hajela (nhajela2@illinois.edu)
 """Fast synthetic tests for :class:`pyhealth.models.SurvivalMDN`."""
 
+import numpy as np
 import pytest
 import torch
 
 from pyhealth.datasets import create_sample_dataset, get_dataloader
-from pyhealth.models.survival_mdn import SurvivalMDN
+from pyhealth.models.survival_mdn import (
+    SurvivalMDN,
+    _ExpTimeTransform,
+    _infer_input_dim,
+    _SoftplusTimeTransform,
+)
 
 
 def _make_dataset():
@@ -207,12 +213,105 @@ def test_state_roundtrip_and_embedding(tmp_path):
     if isinstance(x, tuple):
         x = x[0]
     assert torch.equal(
-        model.forward_from_embedding(x, **batch)["loss"], expected["loss"]
+        model.forward_from_embedding(**{**batch, "features": x})["loss"],
+        expected["loss"],
     )
     with torch.no_grad():
         assert torch.equal(
             model.predict_survival(x, model.time_grid), expected["y_prob"]
         )
+
+
+def test_predict_survival_uses_eval_mode_and_restores_it():
+    model = SurvivalMDN(_make_dataset(), hidden_dim=4, num_components=2)
+    model.train()
+    buffers_before = [b.clone() for b in model.buffers()]
+    x = torch.randn(3, 4)
+    with torch.no_grad():
+        from_train_mode = model.predict_survival(x, model.time_grid)
+    assert model.training
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(buffers_before, model.buffers())
+    )
+    model.eval()
+    with torch.no_grad():
+        from_eval_mode = model.predict_survival(x, model.time_grid)
+    assert not model.training
+    assert torch.equal(from_train_mode, from_eval_mode)
+
+
+def test_forward_from_embedding_without_labels():
+    ds = _make_dataset()
+    model = SurvivalMDN(ds, hidden_dim=4, num_components=2)
+    model.eval()
+    batch = _batch(ds)
+    with torch.no_grad():
+        expected = model(**batch)
+        output = model.forward_from_embedding(features=batch["features"])
+    assert "loss" not in output and "y_true" not in output
+    assert torch.equal(output["y_prob"], expected["y_prob"])
+    with pytest.raises(KeyError, match="Missing"):
+        model.forward_from_embedding(
+            features=batch["features"], duration=batch["duration"]
+        )
+
+
+def test_reference_initialization():
+    ds = _make_dataset()
+    model = SurvivalMDN(
+        ds, hidden_dim=4, num_components=3, reference_initialization=True
+    )
+    model.eval()
+    with torch.no_grad():
+        output = model(**_batch(ds))
+    weights = output["mixture_weights"]
+    assert torch.allclose(weights, torch.full_like(weights, 1 / 3))
+    expected_means = torch.tensor([-3.0, 0.0, 3.0]).expand_as(output["mixture_means"])
+    assert torch.allclose(output["mixture_means"], expected_means)
+
+
+def test_include_jacobian_changes_event_loss():
+    ds = _make_dataset()
+    with_jacobian = SurvivalMDN(ds, hidden_dim=4, num_components=2)
+    without_jacobian = SurvivalMDN(
+        ds, hidden_dim=4, num_components=2, include_jacobian=False
+    )
+    without_jacobian.load_state_dict(with_jacobian.state_dict())
+    with_jacobian.eval()
+    without_jacobian.eval()
+    batch = _batch(ds)
+    with torch.no_grad():
+        assert not torch.allclose(
+            with_jacobian(**batch)["loss"], without_jacobian(**batch)["loss"]
+        )
+
+
+def test_default_time_grid_spans_dataset_durations():
+    model = SurvivalMDN(_make_dataset(), hidden_dim=4, num_components=2)
+    assert model.time_grid.shape == (128,)
+    assert model.time_grid[0].item() == pytest.approx(0.8)
+    assert model.time_grid[-1].item() == pytest.approx(3.1)
+
+
+def test_default_time_grid_with_a_single_duration():
+    samples = [
+        {
+            "patient_id": f"p{i}",
+            "features": [float(i), 1.0, -0.5, 0.2],
+            "duration": [2.0],
+            "event": [float(i % 2)],
+        }
+        for i in range(3)
+    ]
+    ds = create_sample_dataset(
+        samples=samples,
+        input_schema={"features": "tensor"},
+        output_schema={"duration": "tensor", "event": "tensor"},
+        dataset_name="survival_mdn_single_duration",
+    )
+    model = SurvivalMDN(ds, hidden_dim=4, num_components=2)
+    assert torch.allclose(model.time_grid, torch.tensor([2.0]))
 
 
 def test_missing_and_mismatched_fields():
@@ -224,3 +323,28 @@ def test_missing_and_mismatched_fields():
         model(features=torch.ones(2, 3), duration=torch.ones(2), event=torch.ones(2))
     with pytest.raises(ValueError, match="batch size"):
         model(features=torch.ones(2, 4), duration=torch.ones(3), event=torch.ones(2))
+
+
+@pytest.mark.parametrize("transform", [_SoftplusTimeTransform(), _ExpTimeTransform()])
+def test_time_transform_round_trip(transform):
+    time = torch.tensor([1e-3, 0.5, 1.0, 7.0, 40.0], dtype=torch.float64)
+    assert torch.allclose(transform(transform.inverse(time)), time)
+    latent = torch.tensor([-4.0, 0.0, 2.5], dtype=torch.float64)
+    assert torch.allclose(transform.inverse(transform(latent)), latent)
+
+
+def test_input_dim_cannot_be_inferred_from_empty_dataset():
+    with pytest.raises(ValueError, match="empty dataset"):
+        _infer_input_dim([], "features")
+
+
+def test_example_kaplan_meier_matches_hand_computation():
+    from examples.survival_mdn_metrics import km_fit, km_predict
+
+    # Events at t=1 and t=3, censoring at t=2 and t=4.
+    times, survival = km_fit([1.0, 2.0, 3.0, 4.0], [1, 0, 1, 0])
+    np.testing.assert_allclose(times, [0.0, 1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_allclose(survival, [1.0, 0.75, 0.75, 0.375, 0.375])
+    np.testing.assert_allclose(
+        km_predict(times, survival, [-1.0, 2.5, 10.0]), [1.0, 0.5625, 0.375]
+    )

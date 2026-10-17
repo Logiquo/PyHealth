@@ -22,9 +22,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from pyhealth.models import SurvivalMDN
 from survival_mdn_data import Bundle, Split, read_support2, split_frame, synthetic
 from survival_mdn_metrics import paper_metrics, primary_metrics, tail_diagnostics
+
+from pyhealth.models import SurvivalMDN
 
 
 def tensors(part: Split, sort: bool = False) -> tuple[torch.Tensor, ...]:
@@ -70,11 +71,11 @@ def train(
     torch.manual_seed(seed)
     model = SurvivalMDN(
         bundle.train.dataset(),
-        input_dim=27,
         hidden_dim=width,
         num_components=10,
         time_transform=transform,
         time_grid=torch.tensor([1.0]),
+        reference_initialization=True,
     )
     opt = torch.optim.RMSprop(model.parameters(), lr=0.001, weight_decay=1e-6)
     x, t, e = tensors(bundle.train, sort=True)
@@ -167,6 +168,11 @@ def main() -> None:
     p.add_argument("--threads", type=int, default=2)
     p.add_argument("--metrics", choices=["nll", "primary", "all"], default="nll")
     p.add_argument("--vary-hidden", action="store_true")
+    p.add_argument(
+        "--save-prepared",
+        action="store_true",
+        help="With --source support2, also write the encoded patient-level table",
+    )
     p.add_argument("--output", type=Path, default=Path("survival_mdn_run"))
     args = p.parse_args()
     if min(args.epochs, args.patience, args.threads) < 1 or args.batch_size < 2:
@@ -193,7 +199,7 @@ def main() -> None:
     (args.output / "config.json").write_text(
         json.dumps(vars(args), default=str, indent=2)
     )
-    if args.source == "support2":
+    if args.source == "support2" and args.save_prepared:
         frame.to_csv(args.output / "prepared_support.csv", index=False)
     configurations = [("softplus", 32), ("exp", 32)]
     if args.vary_hidden:

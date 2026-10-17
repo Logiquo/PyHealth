@@ -3,8 +3,9 @@
 
 This module implements Survival MDN from Han, Goldstein, and Ranganath,
 "Survival Mixture Density Networks" (MLHC 2022). The implementation is
-written from the paper's equations and validated against the released
-SUPPORT benchmark behavior; it is not copied from the authors' repository.
+written from the paper's equations; it is not copied from the authors'
+repository. The SUPPORT results recorded in examples/survival_mdn_results come
+from a separate standalone implementation, not from this module.
 
 Paper: https://proceedings.mlr.press/v182/han22a.html
 """
@@ -118,14 +119,37 @@ def _value_tensor(value: Tensor | tuple[Tensor, ...]) -> Tensor:
     return value
 
 
+def _infer_time_grid(
+    dataset: SampleDataset, duration_key: str, num_points: int = 128
+) -> Tensor:
+    """Span the dataset's observed durations with an evenly spaced grid."""
+    durations = []
+    for index in range(len(dataset)):
+        value = dataset[index][duration_key]
+        if isinstance(value, tuple):
+            value = value[0]
+        durations.append(torch.as_tensor(value, dtype=torch.float32).reshape(-1))
+    values = torch.cat(durations) if durations else torch.empty(0)
+    values = values[torch.isfinite(values) & (values > 0)]
+    if values.numel() == 0:
+        raise ValueError(
+            "Could not infer time_grid: the dataset has no positive finite "
+            "durations; pass time_grid explicitly."
+        )
+    low, high = values.min().item(), values.max().item()
+    if low == high:
+        return torch.tensor([low])
+    return torch.linspace(low, high, num_points)
+
+
 def _infer_input_dim(dataset: SampleDataset, feature_key: str) -> int:
     """Infer a dense vector width from one processed sample."""
-    try:
-        sample = dataset[0]
-    except Exception as exc:  # pragma: no cover - defensive streaming fallback
+    if len(dataset) == 0:
         raise ValueError(
-            "Could not infer input_dim from the dataset; pass input_dim explicitly."
-        ) from exc
+            "Could not infer input_dim from an empty dataset; pass input_dim "
+            "explicitly."
+        )
+    sample = dataset[0]
     if feature_key not in sample:
         raise ValueError(f"feature_key {feature_key!r} is not present in the dataset")
     value = sample[feature_key]
@@ -171,15 +195,6 @@ class _SurvivalMDNDistribution:
         if include_jacobian:
             result = result + self.time_transform.log_abs_det_inverse_jacobian(time)
         return result
-
-    def log_cdf(self, time: Tensor) -> Tensor:
-        """Return the stable log CDF."""
-        z = self._standardized_latent(time)
-        component_log_cdf = torch.special.log_ndtr(z)
-        return torch.logsumexp(
-            self.params.log_weights + component_log_cdf,
-            dim=-1,
-        )
 
     def log_survival(self, time: Tensor) -> Tensor:
         """Return stable ``log S(time | x)`` without ``1 - CDF`` cancellation."""
@@ -361,13 +376,16 @@ class SurvivalMDN(BaseModel):
             paper baseline; ``"exp"`` is supported for ablation studies.
         min_scale: Minimum Gaussian standard deviation for numerical safety.
         time_grid: Times at which ``y_prob`` returns survival probabilities.
-            If omitted, a 128-point grid from 0.001 to 5.6 is used.
+            If omitted, 128 evenly spaced points from the shortest to the
+            longest duration in ``dataset``.
         include_jacobian: Whether event-density likelihoods include the
             transformation Jacobian. Keep this ``True`` when comparing
-            different time transformations.
+            different time transformations: without the Jacobian, the loss
+            is a density in latent time, so its values are not comparable
+            across ``time_transform`` choices.
         reference_initialization: If ``True``, initialize the three mixture
-            heads to the reference SUPPORT configuration used in the project
-            reproduction.
+            heads to the configuration used in the SUPPORT reproduction:
+            equal weights and means spread over [-3, 3]. Off by default.
 
     Examples:
         >>> from pyhealth.datasets import create_sample_dataset
@@ -413,7 +431,7 @@ class SurvivalMDN(BaseModel):
         min_scale: float = 1e-8,
         time_grid: Tensor | None = None,
         include_jacobian: bool = True,
-        reference_initialization: bool = True,
+        reference_initialization: bool = False,
     ) -> None:
         super().__init__(dataset)
         self.feature_key = feature_key
@@ -446,7 +464,7 @@ class SurvivalMDN(BaseModel):
         if reference_initialization:
             self.network.initialize_reference_heads()
         if time_grid is None:
-            time_grid = torch.linspace(0.001, 5.6, 128)
+            time_grid = _infer_time_grid(dataset, duration_key)
         time_grid = torch.as_tensor(time_grid, dtype=torch.float32)
         _validate_positive_time(time_grid)
         self.register_buffer("time_grid", time_grid.reshape(-1))
@@ -467,32 +485,28 @@ class SurvivalMDN(BaseModel):
             and the fitted mixture weights, means, and scales. ``y_prob`` is
             the survival curve evaluated on ``self.time_grid``.
         """
-        missing = [
-            key
-            for key in (self.feature_key, self.duration_key, self.event_key)
-            if key not in kwargs
-        ]
+        return self._run(kwargs, require_labels=True)
+
+    def _run(
+        self,
+        kwargs: dict[str, Tensor | tuple[Tensor, ...]],
+        require_labels: bool,
+    ) -> dict[str, Tensor]:
+        """Shared forward computation; labels may be omitted only when allowed."""
+        label_keys = (self.duration_key, self.event_key)
+        has_labels = require_labels or any(key in kwargs for key in label_keys)
+        required = (
+            (self.feature_key, *label_keys) if has_labels else (self.feature_key,)
+        )
+        missing = [key for key in required if key not in kwargs]
         if missing:
             raise KeyError(f"Missing required batch fields: {missing}")
 
-        features = _value_tensor(kwargs[self.feature_key])
-        duration = _value_tensor(kwargs[self.duration_key])
-        event = _value_tensor(kwargs[self.event_key])
         features = torch.as_tensor(
-            features,
+            _value_tensor(kwargs[self.feature_key]),
             dtype=torch.float32,
             device=self.device,
         )
-        duration = torch.as_tensor(
-            duration,
-            dtype=torch.float32,
-            device=self.device,
-        ).reshape(-1)
-        event = torch.as_tensor(
-            event,
-            dtype=torch.float32,
-            device=self.device,
-        ).reshape(-1)
         if features.ndim != 2 or features.shape[1] != self.input_dim:
             raise ValueError(
                 "features must have shape [batch, input_dim]; "
@@ -504,14 +518,6 @@ class SurvivalMDN(BaseModel):
 
         # Compute the BatchNorm-containing feature network once per batch.
         params = self.network.mixture_parameters(features)
-        loss = self.network.censored_nll(
-            params,
-            duration,
-            event,
-            include_jacobian=self.include_jacobian,
-        )
-        y_prob = self.network.survival_at(params, self.time_grid)
-        y_true = torch.stack([duration, event], dim=-1)
         logit = torch.cat(
             [
                 params.raw_weight_logits,
@@ -520,24 +526,50 @@ class SurvivalMDN(BaseModel):
             ],
             dim=-1,
         )
-        return {
-            "loss": loss,
+        result = {
             "logit": logit,
-            "y_prob": y_prob,
-            "y_true": y_true,
+            "y_prob": self.network.survival_at(params, self.time_grid),
             "mixture_weights": params.weights,
             "mixture_means": params.means,
             "mixture_scales": params.scales,
         }
+        if has_labels:
+            duration = torch.as_tensor(
+                _value_tensor(kwargs[self.duration_key]),
+                dtype=torch.float32,
+                device=self.device,
+            ).reshape(-1)
+            event = torch.as_tensor(
+                _value_tensor(kwargs[self.event_key]),
+                dtype=torch.float32,
+                device=self.device,
+            ).reshape(-1)
+            result["loss"] = self.network.censored_nll(
+                params,
+                duration,
+                event,
+                include_jacobian=self.include_jacobian,
+            )
+            result["y_true"] = torch.stack([duration, event], dim=-1)
+        return result
 
     def forward_from_embedding(
         self,
-        embeddings: Tensor,
         **kwargs: Tensor | tuple[Tensor, ...],
     ) -> dict[str, Tensor]:
-        """Run ``forward`` with dense features supplied directly."""
-        kwargs[self.feature_key] = embeddings
-        return self.forward(**kwargs)
+        """Run the model with the dense features supplied as embeddings.
+
+        Follows PyHealth's interpretability contract: inputs are keyword
+        arguments keyed by feature name, so ``kwargs[feature_key]`` holds the
+        dense feature vectors. The duration and event labels are optional:
+        without them the loss is skipped, and ``loss`` and ``y_true`` are left
+        out of the result.
+
+        The model has no embedding layer and no ``get_embedding_model``, so
+        the features are used as they are. Interpretability methods should be
+        run without an embedding model.
+        """
+        return self._run(kwargs, require_labels=False)
 
     def predict_survival(
         self,
@@ -552,6 +584,10 @@ class SurvivalMDN(BaseModel):
 
         Returns:
             Survival probabilities with shape ``[batch, num_times]``.
+
+        The prediction always runs in evaluation mode, so BatchNorm uses its
+        running statistics and never updates them. The caller's
+        training/evaluation mode is restored afterwards.
         """
         features = torch.as_tensor(
             features,
@@ -563,5 +599,10 @@ class SurvivalMDN(BaseModel):
             dtype=torch.float32,
             device=self.device,
         )
-        params = self.network.mixture_parameters(features)
-        return self.network.survival_at(params, times)
+        was_training = self.training
+        self.eval()
+        try:
+            params = self.network.mixture_parameters(features)
+            return self.network.survival_at(params, times)
+        finally:
+            self.train(was_training)
