@@ -60,7 +60,7 @@ python examples/support_survival_survival_mdn.py --source benchmark --data /path
 
 This evaluates all horizons for all seeds, extending evaluation beyond the historical seed-1-only secondary horizons. Training otherwise follows the same recipe. Use `--splits 1 --seeds 1 --epochs 2 --metrics nll` for a quick smoke run. Choose a fresh output directory; previous results are not overwritten. Numerical differences across dependency versions and hardware can occur.
 
-For a completed width-32 100-run experiment, run the companion `reproduction/summarize_phase6.py --results /tmp/mdn_benchmark` to regenerate paired statistics. Do not include `--vary-hidden` in that 100-run command.
+The paired statistics in this directory (`paired_split_statistics.csv`, `split_level_5seed_means.csv`) were computed from `all_runs.csv` by pairing the softplus and exponential runs on split and seed. The script that produced them is part of the standalone implementation and is not included here. Do not include `--vary-hidden` in a full 100-run command.
 
 ## Manual acceptance checks
 
