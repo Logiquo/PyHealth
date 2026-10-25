@@ -22,8 +22,11 @@ description = "A Python library for healthcare AI"
 readme = "README.rst"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-  "torch>=2.10",
-  "torchvision",
+  # ROCm (TheRock) device wheels for gfx1100 on Windows. TheRock's torchvision
+  # doesn't pin torch, so cap torch at the version matching the newest stable
+  # torchvision (2.13 <-> 0.28) or torchvision's compiled ops fail to load.
+  "torch[device-gfx1100]>=2.10,<2.14",
+  "torchvision[device-gfx1100]",
   "transformers>=4.53.2",
   "peft",
   "accelerate",
@@ -97,6 +100,23 @@ build-backend = "hatchling.build"
 [tool.ruff]
 line-length = 88
 target-version = "py313"
+
+
+### uv (Windows + ROCm/TheRock + gfx1100)
+#
+[tool.uv]
+environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]
+# uv reads one wheel's metadata per version; TheRock's Linux torch wheels
+# require triton but the Windows ones don't (and no Windows triton exists)
+override-dependencies = ["triton; sys_platform == 'linux'"]
+
+# Not explicit: torch's transitive ROCm packages (rocm, rocm-sdk-*,
+# amd-torch-device-*) must also come from here, and uv only applies
+# tool.uv.sources to direct dependencies. Packages this index hosts take
+# priority over PyPI; everything else falls through to PyPI.
+[[tool.uv.index]]
+name = "therock"
+url = "https://stable.repo.amd.com/rocm/whl-next/"
 
 
 ### Hatchling
