@@ -10,7 +10,7 @@ from pyhealth.metrics import (
     timeseries_binary_metrics_fn,
     timeseries_regression_metrics_fn,
 )
-from pyhealth.models import RNN, MultimodalRNN, MultimodalRNN2
+from pyhealth.models import RNN, MultimodalRNN, Unified_RNN
 from pyhealth.processors import LevelConfig
 from pyhealth.trainer import Trainer
 
@@ -47,8 +47,8 @@ def _dataset(mode="timeseries_binary", labeled=lambda i, h: True):
     )
 
 
-def _model(dataset) -> MultimodalRNN2:
-    model = MultimodalRNN2(dataset, embedding_dim=DIMS, hidden_dim=8, dropout=0.0)
+def _model(dataset) -> Unified_RNN:
+    model = Unified_RNN(dataset, embedding_dim=DIMS, hidden_dim=8, dropout=0.0)
     model.eval()
     return model
 

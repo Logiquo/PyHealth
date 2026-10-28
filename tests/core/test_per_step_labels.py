@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from pyhealth.datasets import create_sample_dataset, get_dataloader
-from pyhealth.models import MultimodalRNN2
+from pyhealth.models import Unified_RNN
 from pyhealth.processors import (
     LevelConfig,
     SequenceProcessorV2,
@@ -118,7 +118,7 @@ class TestPerStepEndToEnd(unittest.TestCase):
             ("timeseries_regression", "mae"),
         ):
             dataset = _dataset(mode)
-            model = MultimodalRNN2(
+            model = Unified_RNN(
                 dataset, embedding_dim={"dynamic": [{"values": 8}]}, hidden_dim=8
             )
             self.assertEqual(model.mode, mode)

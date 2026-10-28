@@ -7,7 +7,7 @@ import torch
 
 from pyhealth.data import Patient
 from pyhealth.datasets import create_sample_dataset, get_dataloader
-from pyhealth.models import LevelEmbedding, MultimodalRNN2
+from pyhealth.models import LevelEmbedding, Unified_RNN
 from pyhealth.processors import LevelConfig, SequenceProcessorV2, TimeseriesProcessor
 from pyhealth.tasks import (
     YAIBAKIMIMIC4,
@@ -642,7 +642,7 @@ class TestYAIBProcessing(unittest.TestCase):
                 dataset = create_sample_dataset(
                     samples, task.input_schema, task.output_schema
                 )
-                model = MultimodalRNN2(dataset, embedding_dim=dims, hidden_dim=8, mask="concat")
+                model = Unified_RNN(dataset, embedding_dim=dims, hidden_dim=8, mask="concat")
                 out = model(**next(iter(get_dataloader(dataset, batch_size=2))))
                 self.assertTrue(torch.isfinite(out["loss"]))
                 expected = 2 if label == "mortality" else sum(

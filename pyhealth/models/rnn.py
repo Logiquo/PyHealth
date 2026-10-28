@@ -947,7 +947,7 @@ class _FieldRNN(nn.Module):
         return summary, states, top["time"]
 
 
-class MultimodalRNN2(BaseModel):
+class Unified_RNN(BaseModel):
     """RNN model over :class:`~pyhealth.processors.SequenceProcessorV2` fields.
 
     Each V2 field is embedded by :class:`SequenceEmbeddingModel` and encoded

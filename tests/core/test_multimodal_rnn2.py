@@ -4,7 +4,7 @@ from typing import Any, cast
 import torch
 
 from pyhealth.datasets import create_sample_dataset, get_dataloader
-from pyhealth.models import LevelEmbedding, MultimodalRNN2
+from pyhealth.models import LevelEmbedding, Unified_RNN
 from pyhealth.models.rnn import _gaps, _pool
 from pyhealth.processors import LevelConfig
 from pyhealth.trainer import Trainer
@@ -54,8 +54,8 @@ def _dataset(output: str = "binary", **fields: Any):
     return create_sample_dataset(samples, schema, {"y": output})
 
 
-def _model(dataset, **kwargs: Any) -> MultimodalRNN2:
-    model = MultimodalRNN2(dataset, dropout=0.0, **kwargs)
+def _model(dataset, **kwargs: Any) -> Unified_RNN:
+    model = Unified_RNN(dataset, dropout=0.0, **kwargs)
     model.eval()
     return model
 
@@ -64,7 +64,7 @@ def _batch(dataset) -> dict[str, Any]:
     return next(iter(get_dataloader(dataset, batch_size=len(dataset))))
 
 
-def _encode(model: MultimodalRNN2, batch: dict[str, Any], field: str):
+def _encode(model: Unified_RNN, batch: dict[str, Any], field: str):
     embedded = model.embedding({field: batch[field]})[field]
     return embedded, cast(Any, model.encoders[field])(embedded)
 
@@ -86,14 +86,14 @@ class TestConfiguration(unittest.TestCase):
         ]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                MultimodalRNN2(self.dataset, embedding_dim=VISIT_DIMS, **kwargs)
+                Unified_RNN(self.dataset, embedding_dim=VISIT_DIMS, **kwargs)
 
     def test_rejects_v1_sequences_sets_and_tokens(self):
         for spec, value in (("sequence", ["A", "B"]), ("multi_hot", ["A"])):
             samples = [{"patient_id": f"p{i}", "x": value, "y": i} for i in range(2)]
             dataset = create_sample_dataset(samples, {"x": spec}, {"y": "binary"})
             with self.subTest(spec=spec), self.assertRaises(TypeError):
-                MultimodalRNN2(dataset, embedding_dim={})
+                Unified_RNN(dataset, embedding_dim={})
 
 
 class TestBottomUp(unittest.TestCase):
@@ -291,13 +291,13 @@ class TestPerStep(unittest.TestCase):
             ]
             dataset = self.dataset(levels, [{"children": [{"tokens": ["A"]}]}] * 2)
             with self.subTest(top=top), self.assertRaisesRegex(ValueError, "Wrap"):
-                MultimodalRNN2(dataset, embedding_dim={"x": [{"tokens": (4,)}, {}]})
+                Unified_RNN(dataset, embedding_dim={"x": [{"tokens": (4,)}, {}]})
 
     def test_no_bidirectional_or_flat_resampled_top(self):
         records = [_visits((0.0, "er", ["A"]))] * 2
         dataset = self.dataset(VISITS, records)
         with self.assertRaises(ValueError):
-            MultimodalRNN2(
+            Unified_RNN(
                 dataset, embedding_dim={"x": VISIT_DIMS["visits"]}, bidirectional=True
             )
         levels: list[LevelConfig] = [
@@ -309,7 +309,7 @@ class TestPerStep(unittest.TestCase):
         ]
         resampled = self.dataset(levels, [{"time": [0.0], "values": [[1.0]]}] * 2)
         with self.assertRaises(ValueError):
-            MultimodalRNN2(
+            Unified_RNN(
                 resampled, embedding_dim={"x": [{"values": 2}]}, hierarchy="flat"
             )
 
@@ -377,7 +377,7 @@ class TestTraining(unittest.TestCase):
         dataset = _dataset(visits=(VISITS, VISIT_RECORDS))
         for hierarchy in ("flat", "bottom_up", "interleaved"):
             with self.subTest(hierarchy=hierarchy):
-                model = MultimodalRNN2(
+                model = Unified_RNN(
                     dataset, embedding_dim=VISIT_DIMS, hidden_dim=8, hierarchy=hierarchy
                 )
                 loader = get_dataloader(dataset, batch_size=2, shuffle=True, seed=0)
