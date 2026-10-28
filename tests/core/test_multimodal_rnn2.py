@@ -1,5 +1,4 @@
 import unittest
-from datetime import datetime, timedelta
 from typing import Any, cast
 
 import torch
@@ -265,20 +264,16 @@ class TestStatics(unittest.TestCase):
 
 
 class TestPerStep(unittest.TestCase):
-    T0 = datetime(2020, 1, 1)
+    def labels(self, times: list[float]) -> dict[str, Any]:
+        return {"time": times, "values": [i % 2 for i in range(len(times))]}
 
-    def labels(self, steps: int) -> tuple[list[datetime], list[int]]:
-        return [self.T0 + timedelta(hours=h) for h in range(steps)], [
-            h % 2 for h in range(steps)
-        ]
-
-    def dataset(self, levels, records, steps: int = 3):
+    def dataset(self, levels, records, times: tuple[float, ...] = (0.0, 1.0, 2.0)):
         samples = [
             {
                 "patient_id": f"p{i}",
                 "x": records[i],
                 "age": [float(i)],
-                "y": self.labels(steps),
+                "y": self.labels(list(times)),
             }
             for i in range(len(records))
         ]
@@ -318,12 +313,12 @@ class TestPerStep(unittest.TestCase):
                 resampled, embedding_dim={"x": [{"values": 2}]}, hierarchy="flat"
             )
 
-    def test_each_step_uses_the_records_before_it(self):
+    def test_each_label_uses_the_records_at_or_before_it(self):
         records = [
-            _visits(
-                (0.5, "er", ["A"]), (2.0, "op", ["B"])
-            ),  # steps 0, 1 see visit 0; step 2 sees visit 1
-            _visits((1.0, "er", ["C"])),  # step 0 sees nothing
+            # Label 0 sees nothing; label 1 sees visit 0; label 2 sees visit 1.
+            _visits((0.5, "er", ["A"]), (2.0, "op", ["B"])),
+            # Label 0 sees nothing; labels 1 and 2 see the visit.
+            _visits((1.0, "er", ["C"])),
         ]
         dataset = self.dataset(VISITS, records)
         for hierarchy in ("bottom_up", "interleaved", "flat"):
@@ -336,17 +331,28 @@ class TestPerStep(unittest.TestCase):
                 )
                 batch = _batch(dataset)
                 result = model(**batch, embed=True)
-                self.assertEqual(result["logit"].shape, (2, 3, 1))
+                self.assertEqual(result["logit"].shape, (6, 1))  # 3 labels each
                 _, (_, states, _) = _encode(model, batch, "x")
                 # In "flat", states are per code; here each visit has one code.
-                embed = result["embed"][..., :5]
-                torch.testing.assert_close(embed[0, 0], states[0])
-                torch.testing.assert_close(embed[0, 1], states[0])
-                torch.testing.assert_close(embed[0, 2], states[1])
-                self.assertTrue(torch.all(embed[1, 0] == 0))
-                torch.testing.assert_close(embed[1, 1], states[2])
-                # The static age is repeated at every step.
-                self.assertEqual(result["embed"][1, :, 5].tolist(), [1.0, 1.0, 1.0])
+                embed = result["embed"][:, :5]
+                self.assertTrue(torch.all(embed[0] == 0))
+                torch.testing.assert_close(embed[1], states[0])
+                torch.testing.assert_close(embed[2], states[1])
+                self.assertTrue(torch.all(embed[3] == 0))
+                torch.testing.assert_close(embed[4], states[2])
+                torch.testing.assert_close(embed[5], states[2])
+                # The static age goes with every label record of its sample.
+                self.assertEqual(result["embed"][:, 5].tolist(), [0.0] * 3 + [1.0] * 3)
+
+    def test_labels_between_records(self):
+        records = [_visits((0.0, "er", ["A"]), (2.0, "op", ["B"]))] * 2
+        dataset = self.dataset(VISITS, records, times=(1.5, 2.5))
+        model = _model(dataset, embedding_dim={"x": VISIT_DIMS["visits"]}, hidden_dim=5)
+        batch = _batch(dataset)
+        embed = model(**batch, embed=True)["embed"][:, :5]
+        _, (_, states, _) = _encode(model, batch, "x")
+        torch.testing.assert_close(embed[0], states[0])  # 1.5: the visit at 0
+        torch.testing.assert_close(embed[1], states[1])  # 2.5: the visit at 2
 
     def test_resampled_top_level(self):
         levels: list[LevelConfig] = [
@@ -362,9 +368,8 @@ class TestPerStep(unittest.TestCase):
         batch = _batch(dataset)
         result = model(**batch, embed=True)
         _, (_, states, _) = _encode(model, batch, "x")
-        torch.testing.assert_close(
-            result["embed"][0, :, :5], states[:3]
-        )  # step s sees record s
+        # Record i is at time i, so the label at time s sees record s.
+        torch.testing.assert_close(result["embed"][:3, :5], states[:3])
 
 
 class TestTraining(unittest.TestCase):

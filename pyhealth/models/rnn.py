@@ -22,6 +22,9 @@ from pyhealth.processors import (
 )
 
 from .embedding import EmbeddingModel
+
+# Label modes with one prediction per label record (TimeseriesLabelProcessor).
+_PER_STEP_MODES = ("timeseries_binary", "timeseries_regression")
 from .sequence_embedding import (
     LevelEmbedding,
     MaskMode,
@@ -233,12 +236,10 @@ class RNN(BaseModel):
             raise ValueError("hidden_size is determined by hidden_dim")
         assert len(self.label_keys) == 1, "Only one label key is supported if RNN is initialized"
         self.label_key = self.label_keys[0]
-        # Per-step (timeseries) labels predict at every input step.
-        self._per_step = self.mode in ("timeseries_binary", "timeseries_regression")
-        if self._per_step and kwargs.get("bidirectional", False):
+        if self.mode in _PER_STEP_MODES:
             raise ValueError(
-                "A per-step label needs a causal model; bidirectional=True would "
-                "use future time steps."
+                "RNN does not support per-step (timeseries_*) labels; use "
+                "MultimodalRNN2 with sequence_v2 inputs."
             )
 
         self.embedding_model = EmbeddingModel(dataset, embedding_dim)
@@ -317,30 +318,14 @@ class RNN(BaseModel):
                 else:
                     mask = (torch.abs(x).sum(dim=-1) != 0).int()
 
-            outputs, x = self.rnn[feature_key](x, mask)
-            # Per-step labels use the output at every step, else the last one.
-            patient_emb.append(outputs if self._per_step else x)
+            _, x = self.rnn[feature_key](x, mask)
+            patient_emb.append(x)
 
-        if self._per_step:
-            # Features without a time axis (one step) are repeated over time.
-            steps = max(emb.shape[1] for emb in patient_emb)
-            for i, emb in enumerate(patient_emb):
-                if emb.shape[1] == 1:
-                    patient_emb[i] = emb.expand(-1, steps, -1)
-                elif emb.shape[1] != steps:
-                    raise ValueError(
-                        "Per-step labels need all time series features on the "
-                        "same time grid."
-                    )
-        patient_emb = torch.cat(patient_emb, dim=-1)
-        # (patient, label_size), or (patient, steps, label_size) per step
+        patient_emb = torch.cat(patient_emb, dim=1)
+        # (patient, label_size)
         logits = self.fc(patient_emb)
         # obtain y_true, loss, y_prob
-        if self._per_step:
-            # (value, mask) per step; the loss averages over labeled steps.
-            y_true = tuple(t.to(self.device) for t in kwargs[self.label_key])
-        else:
-            y_true = kwargs[self.label_key].to(self.device)
+        y_true = kwargs[self.label_key].to(self.device)
         loss = self.get_loss_function()(logits, y_true)
         y_prob = self.prepare_y_prob(logits)
         results = {"loss": loss, "y_prob": y_prob, "y_true": y_true, "logit": logits}
@@ -451,6 +436,11 @@ class MultimodalRNN(BaseModel):
 
         assert len(self.label_keys) == 1, "Only one label key is supported"
         self.label_key = self.label_keys[0]
+        if self.mode in _PER_STEP_MODES:
+            raise ValueError(
+                "MultimodalRNN does not support per-step (timeseries_*) labels; "
+                "use MultimodalRNN2 with sequence_v2 inputs."
+            )
 
         self.embedding_model = EmbeddingModel(dataset, embedding_dim)
 
@@ -608,7 +598,6 @@ class MultimodalRNN(BaseModel):
 Hierarchy = Literal["flat", "bottom_up", "interleaved"]
 RNNType = Literal["RNN", "LSTM", "GRU"]
 SetPooling = Literal["mean", "sum", "max"]
-_PER_STEP_MODES = ("timeseries_binary", "timeseries_regression")
 
 
 def _per_field[T](
@@ -989,13 +978,16 @@ class MultimodalRNN2(BaseModel):
     (``series``) level also gets the time since the previous record of its
     group (in ``"flat"``: of its sample, per timed level).
 
-    Per-step labels (``"timeseries_binary"`` / ``"timeseries_regression"``):
-    the label's steps are on the top level's time axis, in the same unit and
-    starting at 0, so step ``s`` is at time ``s``. Step ``s`` uses each field's
-    top-level state after its last record with time ``< s + 1`` (zeros before
-    the first), and the statics. Every V2 field must have a ``series`` top
-    level; a resampled one counts, with record ``i`` at time ``i * step``.
-    Wrap a ``set`` or ``sequence`` top level in a ``series`` with ``t = 0``.
+    Per-step labels (``"timeseries_binary"`` / ``"timeseries_regression"``,
+    a :class:`~pyhealth.processors.TimeseriesLabelProcessor`): the model
+    predicts once per label record. The label's times are in the unit of the
+    fields' top level, with the same origin, and a label at time ``t`` uses
+    each field's top-level state after its last record with time ``<= t``
+    (zeros before the first) and the statics, so it never sees later records.
+    Every V2 field must have a ``series`` top level; a resampled one counts,
+    with record ``i`` at time ``i * step``. Wrap a ``set`` or ``sequence``
+    top level in a ``series`` with ``t = 0``. Logits are ``[label records,
+    1]``, packed like the label.
 
     Every per-field argument takes one value for all V2 fields, or a
     ``{field: value}`` dict (unlisted fields get the default).
@@ -1199,16 +1191,20 @@ class MultimodalRNN2(BaseModel):
             width += cast(_FieldRNN, self.encoders[field]).output_dim
         self.fc = nn.Linear(width, self.get_output_size())
 
-    def _step_states(
+    def _at_labels(
         self,
         field: str,
         states: torch.Tensor,
         time: torch.Tensor | None,
         batch: torch.Tensor,
-        steps: int,
+        label_time: torch.Tensor,
+        label_sample: torch.Tensor,
     ) -> torch.Tensor:
-        """Each step's top-level state ``[B, steps, H]``: after the last record
-        with time ``< s + 1``, or zeros before the first."""
+        """The top-level state of ``field`` at each label record ``[ΣN, H]``.
+
+        That is the state after the sample's last top-level record with time
+        ``<=`` the label's time, or zeros before the first.
+        """
         if time is None:  # resampled top level: record i is at time i * step
             processor = self.processors[field]
             resample = processor.levels[processor.depth].get("resample")
@@ -1220,15 +1216,16 @@ class MultimodalRNN2(BaseModel):
         padded = time.new_full((n, max(width, 1)), float("inf"))
         group, position = _groups(batch)
         padded[group, position] = time.to(padded.dtype)
-        bounds = torch.arange(1, steps + 1, device=time.device, dtype=padded.dtype)
-        seen = torch.searchsorted(padded, bounds.expand(n, steps).contiguous())
-        index = (batch[:-1].unsqueeze(1) + seen - 1).clamp(min=0)
-        picked = (
-            states[index]
-            if len(states)
-            else states.new_zeros(n, steps, states.shape[1])
-        )
-        return torch.where((seen > 0).unsqueeze(-1), picked, torch.zeros_like(picked))
+        seen = torch.searchsorted(
+            padded[label_sample],
+            label_time.to(padded.dtype).unsqueeze(1),
+            right=True,
+        )[:, 0]
+        index = (batch[:-1][label_sample] + seen - 1).clamp(min=0)
+        if len(states) == 0:
+            return states.new_zeros(len(label_time), states.shape[1])
+        picked = states[index]
+        return torch.where((seen > 0).unsqueeze(1), picked, torch.zeros_like(picked))
 
     def forward(self, **batch: Any) -> dict[str, torch.Tensor]:
         """Predicts the label of a batch of :func:`~pyhealth.datasets.get_dataloader`.
@@ -1241,10 +1238,12 @@ class MultimodalRNN2(BaseModel):
             {field: batch[field] for field in self.sequence_fields}
         )
         label: tuple[torch.Tensor, ...] = ()
-        steps = 0
+        label_time = label_sample = torch.zeros(0, dtype=torch.long)
         if self.per_step:
+            # Packed label records: (values [ΣN, 1], time [ΣN], offsets [B + 1]).
             label = tuple(t.to(self.device) for t in batch[self.label_key])
-            steps = label[0].shape[1]
+            label_time = label[1]
+            label_sample, _ = _groups(label[2])
         parts = []
         for field in self.sequence_fields:
             encoder = cast(_FieldRNN, self.encoders[field])
@@ -1259,12 +1258,14 @@ class MultimodalRNN2(BaseModel):
                 if encoder.hierarchy == "flat"
                 else out[encoder.depth]["offsets"]
             )
-            parts.append(self._step_states(field, states, time, offsets, steps))
+            parts.append(
+                self._at_labels(field, states, time, offsets, label_time, label_sample)
+            )
         for field in self.static_fields:
             x = batch[field].to(self.device).float().flatten(1)
             if field in self.static_projections:
                 x = self.static_projections[field](x)
-            parts.append(x.unsqueeze(1).expand(-1, steps, -1) if self.per_step else x)
+            parts.append(x[label_sample] if self.per_step else x)
         embed = torch.cat(parts, dim=-1)
         logits = self.fc(embed)
         y_true = label if self.per_step else batch[self.label_key].to(self.device)
