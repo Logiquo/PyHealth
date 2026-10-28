@@ -8,6 +8,11 @@ from .concare import ConCare, ConCareLayer
 from .contrawr import ContraWR, ResBlock2D
 from .deepr import Deepr, DeeprLayer
 from .embedding import EmbeddingModel
+from .sequence_embedding import (
+    LevelEmbedding as LevelEmbedding,
+    PretrainedEmbedding as PretrainedEmbedding,
+    SequenceEmbeddingModel as SequenceEmbeddingModel,
+)
 from .gamenet import GAMENet, GAMENetLayer
 from .jamba_ehr import JambaEHR, JambaLayer
 from .logistic_regression import LogisticRegression
@@ -23,6 +28,7 @@ from .mlp import MLP
 from .molerec import MoleRec, MoleRecLayer
 from .retain import MultimodalRETAIN, RETAIN, RETAINLayer
 from .rnn import MultimodalRNN, RNN, RNNLayer
+from .rnn import MultimodalRNN2 as MultimodalRNN2
 from .safedrug import SafeDrug, SafeDrugLayer
 from .sparcnet import DenseBlock, DenseLayer, SparcNet, TransitionLayer
 from .stagenet import StageNet, StageNetLayer
