@@ -223,9 +223,7 @@ class _FieldEmbedding(nn.Module):
         spatial = self.spatial_shapes[level]
         return torch.cat([_broadcast(p, spatial) for p in parts], dim=-1)
 
-    def forward(
-        self, inputs: Sequence[torch.Tensor], flatten_level: bool
-    ) -> dict[Any, Any]:
+    def forward(self, inputs: Sequence[torch.Tensor]) -> dict[Any, Any]:
         fields = dict(zip(self.batch_schema, inputs))
         levels = {
             level: {
@@ -235,36 +233,7 @@ class _FieldEmbedding(nn.Module):
             }
             for level in range(self.depth + 1)
         }
-        if not flatten_level:
-            return levels
-
-        # Each level-0 record gets its ancestors' embeddings and times. The
-        # ancestor at level l + 1 of the records of level l comes from the
-        # offsets at level l, which partition them.
-        offsets = levels[0]["offsets"]  # the last offset is N_0
-        index = torch.arange(int(offsets[-1]), device=offsets.device)
-        embeddings, times = [], []
-        for level in range(self.depth + 1):
-            embedding, time = levels[level]["embedding"], levels[level]["time"]
-            if embedding is not None:
-                embeddings.append(embedding[index])
-            if time is not None:
-                times.append(time[index])
-            if level < self.depth:
-                counts = levels[level]["offsets"].diff()
-                parent = torch.repeat_interleave(
-                    torch.arange(len(counts), device=counts.device), counts
-                )
-                index = parent[index]
-                # Compose the offsets up to the batch: level 0 -> level l + 2.
-                offsets = offsets[levels[level + 1]["offsets"]]
-        spatial = max(self.spatial_shapes, key=len)  # at most one, checked in init
-        embeddings = [_broadcast(e, spatial) for e in embeddings]
-        return {
-            "embedding": torch.cat(embeddings, dim=-1) if embeddings else None,
-            "offsets": offsets,
-            "time": torch.stack(times, dim=1) if times else None,
-        }
+        return levels
 
 
 class SequenceEmbeddingModel(BaseModel):
@@ -284,12 +253,6 @@ class SequenceEmbeddingModel(BaseModel):
         dataset: The dataset, with fitted processors.
         embedding_dim: Per V2 field, one :class:`LevelEmbedding` per level,
             innermost first. Every V2 field must be listed.
-        flatten_level: One bool per V2 field (unlisted fields: False).
-            With False, :meth:`forward` returns each level's packed
-            embeddings separately. With True, it returns one sequence of
-            level-0 records per sample, each record's embedding concatenated
-            with those of its ancestors (``[N_0, D_0 + ... + D_L]``); a record
-            without level-0 records below it contributes nothing.
         flatten_spatial: Per V2 field, one bool per level (default all True).
             True flattens all value axes before the projection, giving
             ``[N, values]``. False flattens only the non-spatial axes and
@@ -320,18 +283,12 @@ class SequenceEmbeddingModel(BaseModel):
         >>> out = model({"visits": batch})["visits"]
         >>> out[0]["embedding"].shape, out[0]["offsets"].tolist(), out[1]["offsets"].tolist()
         (torch.Size([4, 8]), [0, 2, 3, 4], [0, 2, 3])
-        >>> flat = SequenceEmbeddingModel(
-        ...     dataset, embedding_dim={"visits": [{"tokens": (8,)}, {}]}, flatten_level={"visits": True}
-        ... )({"visits": batch})["visits"]
-        >>> flat["embedding"].shape, flat["offsets"].tolist()
-        (torch.Size([4, 8]), [0, 3, 4])
     """
 
     def __init__(
         self,
         dataset: SampleDataset,
         embedding_dim: Mapping[str, Sequence[LevelEmbedding]],
-        flatten_level: Mapping[str, bool] | None = None,
         flatten_spatial: Mapping[str, Sequence[bool]] | None = None,
         pretrain: Sequence[PretrainedEmbedding] | None = None,
         mask: MaskMode = "ignore",
@@ -345,11 +302,9 @@ class SequenceEmbeddingModel(BaseModel):
             if isinstance(processor, SequenceProcessorV2)
         }
         flatten_spatial = dict(flatten_spatial or {})
-        flatten = dict(flatten_level or {})
         for name, config in (
             ("embedding_dim", embedding_dim),
             ("flatten_spatial", flatten_spatial),
-            ("flatten_level", flatten),
         ):
             unknown = set(config) - processors.keys()
             if unknown:
@@ -360,11 +315,6 @@ class SequenceEmbeddingModel(BaseModel):
         missing = processors.keys() - set(embedding_dim)
         if missing:
             raise ValueError(f"embedding_dim has no entry for {sorted(missing)}.")
-        # Whether each V2 field is flattened to one sequence of level-0 records.
-        self.flatten_level = {
-            field: bool(flatten.get(field, False)) for field in processors
-        }
-
         self.embedding_layers = nn.ModuleDict(
             {
                 field: _FieldEmbedding(
@@ -377,16 +327,6 @@ class SequenceEmbeddingModel(BaseModel):
                 for field, processor in processors.items()
             }
         )
-        for field, layers in self.embedding_layers.items():
-            if self.flatten_level[field]:
-                shapes = {s for s in cast(_FieldEmbedding, layers).spatial_shapes if s}
-                if len(shapes) > 1:
-                    raise ValueError(
-                        f"flatten_level: the levels of '{field}' keep different "
-                        f"spatial shapes {sorted(shapes)}, which cannot be "
-                        "concatenated."
-                    )
-
         seen = set()
         for entry in pretrain or ():
             self._load_pretrained(entry, processors, seen)
@@ -471,19 +411,13 @@ class SequenceEmbeddingModel(BaseModel):
                 are read; others are ignored.
 
         Returns:
-            Per V2 field: with ``flatten_level`` False for it, per level
-            ``{"embedding": [N_l, *spatial, D_l] or None, "offsets": the
-            level's offsets (the batch offsets at the top level), "time":
-            [N_l] or None}``; with it True, ``{"embedding":
-            [N_0, *spatial, sum(D_l)], "offsets": [B + 1], "time":
-            [N_0, timed levels] or None}``.
+            Per V2 field, per level: ``{"embedding": [N_l, *spatial, D_l]
+            or None, "offsets": the level's offsets (the batch offsets at
+            the top level), "time": [N_l] or None}``.
         """
         device = self.device
         return {
-            field: layers(
-                tuple(tensor.to(device) for tensor in inputs[field]),
-                self.flatten_level[field],
-            )
+            field: layers(tuple(tensor.to(device) for tensor in inputs[field]))
             for field, layers in self.embedding_layers.items()
             if field in inputs
         }

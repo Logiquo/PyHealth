@@ -595,7 +595,6 @@ class MultimodalRNN(BaseModel):
 # MultimodalRNN2: RNNs over the packed records of SequenceProcessorV2 fields
 # ----------------------------------------------------------------------------
 
-Hierarchy = Literal["flat", "bottom_up", "interleaved"]
 RNNType = Literal["RNN", "LSTM", "GRU"]
 SetPooling = Literal["mean", "sum", "max"]
 
@@ -686,50 +685,6 @@ def _rnn_over_groups(
     return summary, outputs[rank[group], position]
 
 
-class _StepRNN(nn.Module):
-    """A unidirectional RNN advanced one step at a time (for interleaving)."""
-
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        rnn_type: RNNType,
-        num_layers: int,
-        dropout: float,
-    ):
-        super().__init__()
-        self.hidden_size, self.num_layers, self.rnn_type = (
-            hidden_size,
-            num_layers,
-            rnn_type,
-        )
-        self.dropout_layer = nn.Dropout(dropout)
-        self.rnn = getattr(nn, rnn_type)(
-            input_size,
-            hidden_size,
-            num_layers=num_layers,
-            dropout=dropout if num_layers > 1 else 0,
-            batch_first=True,
-        )
-
-    def initial(self, n: int, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Zero state for ``n`` sequences: ``(h, c)``; ``c`` is unused but for LSTM."""
-        zeros = like.new_zeros(self.num_layers, n, self.hidden_size)
-        return zeros, zeros
-
-    def forward(
-        self, x: torch.Tensor, state: tuple[torch.Tensor, torch.Tensor]
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """One step: ``x [G, D]`` -> output ``[G, H]`` and the new state."""
-        x = self.dropout_layer(x).unsqueeze(1)
-        if self.rnn_type == "LSTM":
-            out, (h, c) = self.rnn(x, state)
-        else:
-            out, h = self.rnn(x, state[0])
-            c = state[1]
-        return out[:, 0], (h, c)
-
-
 class _FieldRNN(nn.Module):
     """Encodes one V2 field's level embeddings into one summary per sample."""
 
@@ -738,7 +693,6 @@ class _FieldRNN(nn.Module):
         field: str,
         processor: SequenceProcessorV2,
         level_dims: Sequence[int],
-        hierarchy: Hierarchy,
         hidden_dim: int,
         rnn_type: RNNType,
         num_layers: int,
@@ -748,10 +702,8 @@ class _FieldRNN(nn.Module):
         time_feature: bool,
     ):
         super().__init__()
-        self.hierarchy: Hierarchy = hierarchy
         self.set_pooling: SetPooling = set_pooling
         self.depth = processor.depth
-        self.hidden_dim = hidden_dim
         orderings = processor.ordering()
         # A level runs an RNN unless it is a set (a resampled series is a sequence).
         self.is_rnn = [orderings[level] != "set" for level in range(self.depth + 1)]
@@ -759,8 +711,6 @@ class _FieldRNN(nn.Module):
         self.gap_levels = sorted(timed) if time_feature else []
 
         def rnn(input_size: int) -> nn.Module:
-            if hierarchy == "interleaved":
-                return _StepRNN(input_size, hidden_dim, rnn_type, num_layers, dropout)
             return RNNLayer(
                 input_size,
                 hidden_dim,
@@ -771,27 +721,9 @@ class _FieldRNN(nn.Module):
             )
 
         self.encoders = nn.ModuleList()
-        if hierarchy == "flat":
-            width = sum(level_dims) + len(self.gap_levels)
-            self.flat_rnn = any(self.is_rnn)
-            self.encoders.append(rnn(width) if self.flat_rnn else nn.Identity())
-            self.output_dim = hidden_dim if self.flat_rnn else width
-            return
-
-        # The context a level's records receive from the level above
-        # (interleaved only): the parent level's state, passed through sets.
-        context = [0] * (self.depth + 1)
-        if hierarchy == "interleaved":
-            for level in range(self.depth - 1, -1, -1):
-                context[level] = (
-                    hidden_dim if self.is_rnn[level + 1] else context[level + 1]
-                )
-        self.context_dims = context
         below = 0  # the summary size of the level below
         for level in range(self.depth + 1):
-            width = (
-                level_dims[level] + below + context[level] + (level in self.gap_levels)
-            )
+            width = level_dims[level] + below + (level in self.gap_levels)
             if width == 0:
                 raise ValueError(
                     f"'{field}' level {level} has nothing to encode: no embedding, "
@@ -832,77 +764,6 @@ class _FieldRNN(nn.Module):
         assert summary is not None
         return summary, states  # states: the top level's per-record outputs
 
-    # -- interleaved -----------------------------------------------------------
-
-    def _interleave(
-        self,
-        level: int,
-        out: dict[Any, Any],
-        start: torch.Tensor,
-        count: torch.Tensor,
-        context: torch.Tensor,
-        top_states: list[tuple[torch.Tensor, torch.Tensor]],
-    ) -> torch.Tensor:
-        """Encodes groups of level-``level`` records ``[start, start + count)``.
-
-        ``context`` is each group's context from the level above, ``[G, C]``.
-        Returns each group's summary ``[G, S]``; at the top level, also
-        collects each record's state in ``top_states``.
-        """
-        embedding = out[level]["embedding"]
-        children = out[level - 1]["offsets"] if level > 0 else None
-        gaps = (
-            _gaps(out[level]["time"], out[level]["offsets"]).unsqueeze(1)
-            if level in self.gap_levels
-            else None
-        )
-
-        def inputs(
-            records: torch.Tensor, own: torch.Tensor, below: torch.Tensor
-        ) -> torch.Tensor:
-            # A record's input: its embedding, the summary of its children
-            # (encoded with context `below`), its own context and its gap.
-            rows = [embedding[records]] if embedding is not None else []
-            if children is not None:
-                first = children[records]
-                rows.append(
-                    self._interleave(
-                        level - 1,
-                        out,
-                        first,
-                        children[records + 1] - first,
-                        below,
-                        top_states,
-                    )
-                )
-            if own.shape[1]:
-                rows.append(own)
-            if gaps is not None:
-                rows.append(gaps[records])
-            return torch.cat(rows, dim=1)
-
-        if not self.is_rnn[level]:
-            # A set pools its records; its context passes on to their children.
-            local = torch.cat([count.new_zeros(1), torch.cumsum(count, 0)])
-            group, position = _groups(local)
-            records = start[group] + position
-            own = context[group]
-            return _pool(inputs(records, own, own), local, self.set_pooling)
-
-        rnn = self.encoders[level]
-        assert isinstance(rnn, _StepRNN)
-        h, c = rnn.initial(len(start), context)
-        for t in range(int(count.max()) if len(count) else 0):
-            active = torch.nonzero(count > t).squeeze(1)
-            records = start[active] + t
-            # The children of record t see this level's state before it.
-            x = inputs(records, context[active], h[-1, active])
-            step, (h_t, c_t) = rnn(x, (h[:, active], c[:, active]))
-            h, c = h.index_copy(1, active, h_t), c.index_copy(1, active, c_t)
-            if level == self.depth:
-                top_states.append((records, step))
-        return h[-1]  # zeros for a group without records
-
     # -- forward -----------------------------------------------------------------
 
     def forward(
@@ -914,37 +775,8 @@ class _FieldRNN(nn.Module):
         top-level records (None if the top level is pooled) and their times
         (None if the top level has no time column).
         """
-        if self.hierarchy == "flat":
-            x, offsets = out["embedding"], out["offsets"]
-            if self.gap_levels:
-                x = torch.cat([x, _gaps(out["time"], offsets)], dim=1)
-            if not self.flat_rnn:
-                return _pool(x, offsets, self.set_pooling), None, None
-            encoder = cast(RNNLayer, self.encoders[0])
-            summary, states = _rnn_over_groups(encoder, x, offsets)
-            time = out["time"][:, -1] if out["time"] is not None else None
-            return summary, states, time
-        top = out[self.depth]
-        if self.hierarchy == "bottom_up":
-            summary, states = self._bottom_up(out)
-            return summary, states, top["time"]
-
-        batch = top["offsets"]
-        collected: list[tuple[torch.Tensor, torch.Tensor]] = []
-        summary = self._interleave(
-            self.depth,
-            out,
-            batch[:-1],
-            batch.diff(),
-            torch.zeros(len(batch) - 1, 0, device=batch.device),
-            collected,
-        )
-        if not self.is_rnn[self.depth]:
-            return summary, None, top["time"]
-        states = torch.zeros(int(batch[-1]), self.hidden_dim, device=batch.device)
-        for records, step in collected:
-            states = states.index_put((records,), step)
-        return summary, states, top["time"]
+        summary, states = self._bottom_up(out)
+        return summary, states, out[self.depth]["time"]
 
 
 class Unified_RNN(BaseModel):
@@ -957,26 +789,16 @@ class Unified_RNN(BaseModel):
     linear layer predicts the label. Other processors are rejected: sequences,
     sets and token fields are expressed with ``"sequence_v2"``.
 
-    A V2 field is encoded according to its ``hierarchy``:
-
-    - ``"flat"``: each sample becomes one sequence of level-0 records, each
-      embedding concatenated with its ancestors', encoded by one RNN (or
-      pooled, if every level is a ``set``).
-    - ``"bottom_up"``: level by level, from level 0 up. A level's input is
-      its records' embeddings concatenated with the summary of each record's
-      children; a ``set`` level pools each group, a ``sequence`` / ``series``
-      level runs its RNN over each group and keeps the last output, giving
-      one summary per parent record, up to one per sample.
-    - ``"interleaved"``: like ``"bottom_up"``, but information also flows
-      down: before each record of a level, that level's RNN state is passed
-      to the record's children as context (concatenated to their inputs),
-      and the children's summary feeds the step. Only earlier records shape
-      a record's context, so it is causal, but each level runs step by step.
+    Each V2 field is encoded bottom-up, level by level, from level 0 up.
+    A level's input is its records' embeddings concatenated with the summary
+    of each record's children. A ``set`` level pools each group; a
+    ``sequence`` / ``series`` level runs its RNN over each group and keeps
+    the last output, giving one summary per parent record, up to one per sample.
 
     A group without records (e.g. a stay without labs) is skipped by the RNN
     and summarized as zeros. With ``time_feature``, each record of a timed
     (``series``) level also gets the time since the previous record of its
-    group (in ``"flat"``: of its sample, per timed level).
+    group.
 
     Per-step labels (``"timeseries_binary"`` / ``"timeseries_regression"``,
     a :class:`~pyhealth.processors.TimeseriesLabelProcessor`): the model
@@ -996,14 +818,11 @@ class Unified_RNN(BaseModel):
         dataset: The dataset, with fitted processors.
         embedding_dim: Per V2 field, one
             :class:`~pyhealth.models.LevelEmbedding` per level.
-        hierarchy: ``"flat"``, ``"bottom_up"`` (default) or
-            ``"interleaved"``, per field.
         hidden_dim: The hidden size of every RNN of a field.
         rnn_type: ``"RNN"``, ``"LSTM"`` or ``"GRU"`` (default), per field.
         num_layers: The layers of each level's RNN, per field.
         dropout: Dropout before each RNN, per field.
-        bidirectional: Bidirectional RNNs, per field. Not with
-            ``"interleaved"`` or per-step labels.
+        bidirectional: Bidirectional RNNs, per field. Not with per-step labels.
         set_pooling: ``"mean"`` (default), ``"sum"`` or ``"max"`` for ``set``
             levels, per field.
         time_feature: Whether timed levels get the time since the previous
@@ -1040,7 +859,6 @@ class Unified_RNN(BaseModel):
         self,
         dataset: SampleDataset,
         embedding_dim: Mapping[str, Sequence[LevelEmbedding]],
-        hierarchy: Hierarchy | Mapping[str, Hierarchy] = "bottom_up",
         hidden_dim: int | Mapping[str, int] = 128,
         rnn_type: RNNType | Mapping[str, RNNType] = "GRU",
         num_layers: int | Mapping[str, int] = 1,
@@ -1074,13 +892,6 @@ class Unified_RNN(BaseModel):
                 )
 
         fields = self.sequence_fields
-        hierarchies: dict[str, Hierarchy] = _per_field(
-            "hierarchy",
-            hierarchy,
-            fields,
-            "bottom_up",
-            lambda v: v in get_args(Hierarchy),
-        )
         hidden = _per_field(
             "hidden_dim",
             hidden_dim,
@@ -1123,11 +934,6 @@ class Unified_RNN(BaseModel):
         )
 
         for field in fields:
-            if bidirectionals[field] and hierarchies[field] == "interleaved":
-                raise ValueError(
-                    f"'{field}': an interleaved hierarchy steps forward through "
-                    "time, so it cannot be bidirectional."
-                )
             if bidirectionals[field] and self.per_step:
                 raise ValueError(
                     "A per-step label needs a causal model; bidirectional=True "
@@ -1146,16 +952,10 @@ class Unified_RNN(BaseModel):
                         "step can use the records before it. Wrap a 'set' or "
                         "'sequence' top level in a 'series' with t = 0."
                     )
-                if hierarchies[field] == "flat" and top.get("resample") is not None:
-                    raise ValueError(
-                        f"'{field}': a resampled top level has no time column once "
-                        "flattened; use hierarchy 'bottom_up' or 'interleaved'."
-                    )
 
         self.embedding = SequenceEmbeddingModel(
             dataset,
             embedding_dim=embedding_dim,
-            flatten_level={field: hierarchies[field] == "flat" for field in fields},
             pretrain=pretrain,
             mask=mask,
         )
@@ -1165,7 +965,6 @@ class Unified_RNN(BaseModel):
                     field,
                     self.processors[field],
                     self.embedding.embedding_dim_per_level(field),
-                    hierarchies[field],
                     hidden[field],
                     rnn_types[field],
                     layers[field],
@@ -1253,11 +1052,7 @@ class Unified_RNN(BaseModel):
                 continue
             assert states is not None  # a series top level has states
             out = embedded[field]
-            offsets = (
-                out["offsets"]
-                if encoder.hierarchy == "flat"
-                else out[encoder.depth]["offsets"]
-            )
+            offsets = out[encoder.depth]["offsets"]
             parts.append(
                 self._at_labels(field, states, time, offsets, label_time, label_sample)
             )

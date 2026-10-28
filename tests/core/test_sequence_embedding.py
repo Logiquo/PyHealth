@@ -103,7 +103,6 @@ class TestConfiguration(unittest.TestCase):
             },  # no spatial
             {"embedding_dim": LAB_DIMS, "flatten_spatial": {"labs": [True]}},
             {"embedding_dim": LAB_DIMS, "flatten_spatial": {"other": [True]}},
-            {"embedding_dim": LAB_DIMS, "flatten_level": {"other": True}},
         ]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -214,102 +213,6 @@ class TestLevels(unittest.TestCase):
         )
 
 
-class TestFlattenLevel(unittest.TestCase):
-    def test_records_carry_their_ancestors(self):
-        # stays (with a ward token, timed) -> visits (with a type token, timed) -> codes
-        levels: list[LevelConfig] = [
-            {"ordering": "set", "tokens": 1},
-            {"ordering": "series", "tokens": 1},
-            {"ordering": "series", "tokens": 1},
-        ]
-        records = [
-            {
-                "time": [0.0, 50.0],
-                "tokens": ["icu", "ward"],
-                "children": [
-                    {
-                        "time": [1.0, 2.0],
-                        "tokens": ["er", "op"],
-                        "children": [{"tokens": ["A", "B"]}, {"tokens": ["C"]}],
-                    },
-                    {
-                        "time": [3.0],
-                        "tokens": ["er"],
-                        "children": [{"tokens": []}],
-                    },  # no codes
-                ],
-            },
-            {
-                "time": [5.0],
-                "tokens": ["icu"],
-                "children": [
-                    {"time": [6.0], "tokens": ["op"], "children": [{"tokens": ["B"]}]}
-                ],
-            },
-        ]
-        dataset = _dataset(stays=(levels, records))
-        dims: dict[str, list[LevelEmbedding]] = {
-            "stays": [{"tokens": (2,)}, {"tokens": (3,)}, {"tokens": (4,)}]
-        }
-        batch = _batch(dataset, "stays")
-        model = SequenceEmbeddingModel(
-            dataset, embedding_dim=dims, flatten_level={"stays": True}
-        )
-        # The same weights, level by level, as the reference.
-        levelwise = SequenceEmbeddingModel(dataset, embedding_dim=dims)
-        levelwise.load_state_dict(model.state_dict())
-        per_level = levelwise({"stays": batch})["stays"]
-        flat = model({"stays": batch})["stays"]
-
-        # Codes A, B, C (sample 0) and B (sample 1); the visit without codes is gone.
-        self.assertEqual(flat["embedding"].shape, (4, 2 + 3 + 4))
-        self.assertEqual(flat["offsets"].tolist(), [0, 3, 4])
-        visit = torch.tensor([0, 0, 1, 3])  # each code's visit
-        stay = torch.tensor([0, 0, 0, 2])  # each code's stay
-        expected = torch.cat(
-            [
-                per_level[0]["embedding"],
-                per_level[1]["embedding"][visit],
-                per_level[2]["embedding"][stay],
-            ],
-            dim=1,
-        )
-        torch.testing.assert_close(flat["embedding"], expected)
-        self.assertEqual(
-            flat["time"].tolist(), [[1.0, 0.0], [1.0, 0.0], [2.0, 0.0], [6.0, 5.0]]
-        )
-
-    def test_spatial_shapes_must_agree(self):
-        levels: list[LevelConfig] = [
-            {"ordering": "series", "values": [2, 4], "spatial": [False, True]},
-            {"ordering": "series", "values": [3], "spatial": [True]},
-        ]
-        records = [
-            {
-                "time": [0.0],
-                "values": [[1.0, 2.0, 3.0]],
-                "children": [{"time": [0.0], "values": torch.rand(1, 2, 4).tolist()}],
-            }
-        ] * 2
-        dataset = _dataset(x=(levels, records))
-        dims: dict[str, list[LevelEmbedding]] = {"x": [{"values": 2}, {"values": 2}]}
-        with self.assertRaises(ValueError):
-            SequenceEmbeddingModel(
-                dataset,
-                embedding_dim=dims,
-                flatten_level={"x": True},
-                flatten_spatial={"x": [False, False]},
-            )
-        # One spatial level is fine: the other is broadcast over its positions.
-        out = SequenceEmbeddingModel(
-            dataset,
-            embedding_dim=dims,
-            flatten_level={"x": True},
-            flatten_spatial={"x": [False, True]},
-        )({"x": _batch(dataset, "x")})["x"]
-        self.assertEqual(out["embedding"].shape, (2, 4, 4))
-
-
 class TestMask(unittest.TestCase):
     def setUp(self):
         levels: list[LevelConfig] = [
@@ -411,12 +314,10 @@ class TestPretrain(unittest.TestCase):
 class TestTraining(unittest.TestCase):
     def test_dataloader_batch_and_gradients(self):
         dataset = _dataset(labs=(LABS, LAB_RECORDS))
-        model = SequenceEmbeddingModel(
-            dataset, embedding_dim=LAB_DIMS, flatten_level={"labs": True}
-        )
+        model = SequenceEmbeddingModel(dataset, embedding_dim=LAB_DIMS)
         batch = next(iter(get_dataloader(dataset, batch_size=2)))
         out = model(batch)["labs"]
-        out["embedding"].sum().backward()
+        out[0]["embedding"].sum().backward()
         self.assertIsNotNone(_layer(model, "labs", 0, "value_proj").weight.grad)
         self.assertIsNotNone(_layer(model, "labs", 0, "token_1").weight.grad)
 

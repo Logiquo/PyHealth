@@ -75,14 +75,11 @@ class TestConfiguration(unittest.TestCase):
 
     def test_rejects_bad_arguments(self):
         bad: list[dict[str, Any]] = [
-            {"hierarchy": "top_down"},
-            {"hierarchy": {"other": "flat"}},  # unknown field
             {"hidden_dim": 0},
             {"rnn_type": "Transformer"},
             {"num_layers": {"visits": 0}},
             {"dropout": 1.5},
             {"set_pooling": "median"},
-            {"bidirectional": True, "hierarchy": "interleaved"},
         ]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -150,87 +147,17 @@ class TestBottomUp(unittest.TestCase):
         self.assertEqual(width(timed), width(plain) + 1)
 
 
-class TestInterleaved(unittest.TestCase):
-    def reference(self, model, out, sample: int) -> torch.Tensor:
-        """The interleaved encoding of one sample, record by record."""
-        encoder = cast(Any, model.encoders["visits"])
-        rnn = encoder.encoders[1]
-        codes, visits = out[0], out[1]
-        h = torch.zeros(1, 1, 5)
-        c = torch.zeros(1, 1, 5)
-        lo, hi = int(visits["offsets"][sample]), int(visits["offsets"][sample + 1])
-        for v in range(lo, hi):
-            c0, c1 = int(codes["offsets"][v]), int(codes["offsets"][v + 1])
-            context = h[-1, 0]  # the visit level's state before this visit
-            rows = [torch.cat([codes["embedding"][i], context]) for i in range(c0, c1)]
-            pooled = torch.stack(rows).mean(0) if rows else torch.zeros(4 + 5)
-            x = torch.cat([visits["embedding"][v], pooled]).unsqueeze(0)
-            _, (h, c) = rnn(x, (h, c))
-        return h[-1, 0]
-
-    def test_matches_a_loop_reference(self):
-        dataset = _dataset(visits=(VISITS, VISIT_RECORDS))
-        model = _model(
-            dataset, embedding_dim=VISIT_DIMS, hidden_dim=5, hierarchy="interleaved"
-        )
-        out, (summary, states, _) = _encode(model, _batch(dataset), "visits")
-        expected = torch.stack(
-            [self.reference(model, out, b) for b in range(len(dataset))]
-        )
-        torch.testing.assert_close(summary, expected)
-        self.assertEqual(states.shape, (6, 5))
-        self.assertTrue(torch.all(summary[2] == 0))
-
     def test_lstm(self):
         dataset = _dataset(visits=(VISITS, VISIT_RECORDS))
         model = _model(
             dataset,
             embedding_dim=VISIT_DIMS,
             hidden_dim=5,
-            hierarchy="interleaved",
             rnn_type="LSTM",
             num_layers=2,
         )
         result = model(**_batch(dataset))
         self.assertEqual(result["logit"].shape, (4, 1))
-
-
-class TestFlat(unittest.TestCase):
-    def test_runs_one_rnn_over_flattened_records(self):
-        dataset = _dataset(visits=(VISITS, VISIT_RECORDS))
-        model = _model(
-            dataset, embedding_dim=VISIT_DIMS, hidden_dim=5, hierarchy="flat"
-        )
-        out, (summary, states, time) = _encode(model, _batch(dataset), "visits")
-        encoder = cast(Any, model.encoders["visits"])
-        expected = []
-        for b in range(len(dataset)):
-            lo, hi = int(out["offsets"][b]), int(out["offsets"][b + 1])
-            if lo == hi:
-                expected.append(torch.zeros(5))
-                continue
-            _, last = encoder.encoders[0](out["embedding"][lo:hi].unsqueeze(0))
-            expected.append(last[0])
-        torch.testing.assert_close(summary, torch.stack(expected))
-        # 8 codes, each with its visit's embedding; the empty visit drops out.
-        self.assertEqual(out["embedding"].shape, (8, 4 + 3))
-        self.assertEqual(time.tolist(), [0.0, 0.0, 3.0, 0.0, 0.5, 0.5, 0.5, 2.0])
-        self.assertEqual(states.shape, (8, 5))
-
-    def test_all_sets_are_pooled(self):
-        levels: list[LevelConfig] = [
-            {"ordering": "set", "tokens": 1},
-            {"ordering": "set"},
-        ]
-        records = [{"children": [{"tokens": ["A"]}, {"tokens": ["B", "C"]}]}] * 2
-        dataset = _dataset(groups=(levels, records))
-        model = _model(
-            dataset, embedding_dim={"groups": [{"tokens": (4,)}, {}]}, hierarchy="flat"
-        )
-        self.assertIsInstance(
-            cast(Any, model.encoders["groups"]).encoders[0], torch.nn.Identity
-        )
-        self.assertEqual(model(**_batch(dataset))["logit"].shape, (2, 1))
 
 
 class TestStatics(unittest.TestCase):
@@ -256,7 +183,6 @@ class TestStatics(unittest.TestCase):
         model = _model(
             dataset,
             embedding_dim=dims,
-            hierarchy={"visits": "flat", "stays": "interleaved"},
             hidden_dim={"visits": 4, "stays": 6},
         )
         self.assertEqual(model.fc.in_features, 4 + 6)
@@ -293,24 +219,12 @@ class TestPerStep(unittest.TestCase):
             with self.subTest(top=top), self.assertRaisesRegex(ValueError, "Wrap"):
                 Unified_RNN(dataset, embedding_dim={"x": [{"tokens": (4,)}, {}]})
 
-    def test_no_bidirectional_or_flat_resampled_top(self):
+    def test_no_bidirectional(self):
         records = [_visits((0.0, "er", ["A"]))] * 2
         dataset = self.dataset(VISITS, records)
         with self.assertRaises(ValueError):
             Unified_RNN(
                 dataset, embedding_dim={"x": VISIT_DIMS["visits"]}, bidirectional=True
-            )
-        levels: list[LevelConfig] = [
-            {
-                "ordering": "series",
-                "values": [1],
-                "resample": {"step": 1.0, "method": "last"},
-            }
-        ]
-        resampled = self.dataset(levels, [{"time": [0.0], "values": [[1.0]]}] * 2)
-        with self.assertRaises(ValueError):
-            Unified_RNN(
-                resampled, embedding_dim={"x": [{"values": 2}]}, hierarchy="flat"
             )
 
     def test_each_label_uses_the_records_at_or_before_it(self):
@@ -321,28 +235,24 @@ class TestPerStep(unittest.TestCase):
             _visits((1.0, "er", ["C"])),
         ]
         dataset = self.dataset(VISITS, records)
-        for hierarchy in ("bottom_up", "interleaved", "flat"):
-            with self.subTest(hierarchy=hierarchy):
-                model = _model(
-                    dataset,
-                    embedding_dim={"x": VISIT_DIMS["visits"]},
-                    hidden_dim=5,
-                    hierarchy=hierarchy,
-                )
-                batch = _batch(dataset)
-                result = model(**batch, embed=True)
-                self.assertEqual(result["logit"].shape, (6, 1))  # 3 labels each
-                _, (_, states, _) = _encode(model, batch, "x")
-                # In "flat", states are per code; here each visit has one code.
-                embed = result["embed"][:, :5]
-                self.assertTrue(torch.all(embed[0] == 0))
-                torch.testing.assert_close(embed[1], states[0])
-                torch.testing.assert_close(embed[2], states[1])
-                self.assertTrue(torch.all(embed[3] == 0))
-                torch.testing.assert_close(embed[4], states[2])
-                torch.testing.assert_close(embed[5], states[2])
-                # The static age goes with every label record of its sample.
-                self.assertEqual(result["embed"][:, 5].tolist(), [0.0] * 3 + [1.0] * 3)
+        model = _model(
+            dataset,
+            embedding_dim={"x": VISIT_DIMS["visits"]},
+            hidden_dim=5,
+        )
+        batch = _batch(dataset)
+        result = model(**batch, embed=True)
+        self.assertEqual(result["logit"].shape, (6, 1))  # 3 labels each
+        _, (_, states, _) = _encode(model, batch, "x")
+        embed = result["embed"][:, :5]
+        self.assertTrue(torch.all(embed[0] == 0))
+        torch.testing.assert_close(embed[1], states[0])
+        torch.testing.assert_close(embed[2], states[1])
+        self.assertTrue(torch.all(embed[3] == 0))
+        torch.testing.assert_close(embed[4], states[2])
+        torch.testing.assert_close(embed[5], states[2])
+        # The static age goes with every label record of its sample.
+        self.assertEqual(result["embed"][:, 5].tolist(), [0.0] * 3 + [1.0] * 3)
 
     def test_labels_between_records(self):
         records = [_visits((0.0, "er", ["A"]), (2.0, "op", ["B"]))] * 2
@@ -373,21 +283,19 @@ class TestPerStep(unittest.TestCase):
 
 
 class TestTraining(unittest.TestCase):
-    def test_trains_with_every_hierarchy(self):
+    def test_trains(self):
         dataset = _dataset(visits=(VISITS, VISIT_RECORDS))
-        for hierarchy in ("flat", "bottom_up", "interleaved"):
-            with self.subTest(hierarchy=hierarchy):
-                model = Unified_RNN(
-                    dataset, embedding_dim=VISIT_DIMS, hidden_dim=8, hierarchy=hierarchy
-                )
-                loader = get_dataloader(dataset, batch_size=2, shuffle=True, seed=0)
-                trainer = Trainer(model=model, enable_logging=False)
-                trainer.train(train_dataloader=loader, epochs=2)
-                result = model(**_batch(dataset))
-                self.assertTrue(torch.isfinite(result["loss"]))
-                result["loss"].backward()
-                grads = [p.grad for p in model.parameters() if p.requires_grad]
-                self.assertTrue(any(g is not None and torch.any(g != 0) for g in grads))
+        model = Unified_RNN(
+            dataset, embedding_dim=VISIT_DIMS, hidden_dim=8
+        )
+        loader = get_dataloader(dataset, batch_size=2, shuffle=True, seed=0)
+        trainer = Trainer(model=model, enable_logging=False)
+        trainer.train(train_dataloader=loader, epochs=2)
+        result = model(**_batch(dataset))
+        self.assertTrue(torch.isfinite(result["loss"]))
+        result["loss"].backward()
+        grads = [p.grad for p in model.parameters() if p.requires_grad]
+        self.assertTrue(any(g is not None and torch.any(g != 0) for g in grads))
 
 
 if __name__ == "__main__":
