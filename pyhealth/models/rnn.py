@@ -596,7 +596,6 @@ class MultimodalRNN(BaseModel):
 # ----------------------------------------------------------------------------
 
 RNNType = Literal["RNN", "LSTM", "GRU"]
-SetPooling = Literal["mean", "sum", "max"]
 
 
 def _per_field[T](
@@ -635,18 +634,13 @@ def _groups(offsets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return group, torch.arange(len(group), device=offsets.device) - offsets[:-1][group]
 
 
-def _pool(x: torch.Tensor, offsets: torch.Tensor, how: SetPooling) -> torch.Tensor:
-    """Pools the rows of each group; an empty group gives zeros."""
+def _pool(x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+    """Mean-pools the rows of each group; an empty group gives zeros."""
     counts = offsets.diff()
     group, _ = _groups(offsets)
     out = x.new_zeros(len(counts), x.shape[1])
-    if how == "max":
-        index = group.unsqueeze(1).expand_as(x)
-        return out.scatter_reduce(0, index, x, reduce="amax", include_self=False)
     out = out.index_add(0, group, x)
-    if how == "mean":
-        out = out / counts.clamp(min=1).unsqueeze(1).to(x.dtype)
-    return out
+    return out / counts.clamp(min=1).unsqueeze(1).to(x.dtype)
 
 
 def _gaps(time: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
@@ -698,11 +692,9 @@ class _FieldRNN(nn.Module):
         num_layers: int,
         dropout: float,
         bidirectional: bool,
-        set_pooling: SetPooling,
         time_feature: bool,
     ):
         super().__init__()
-        self.set_pooling: SetPooling = set_pooling
         self.depth = processor.depth
         orderings = processor.ordering()
         # A level runs an RNN unless it is a set (a resampled series is a sequence).
@@ -760,7 +752,7 @@ class _FieldRNN(nn.Module):
                 encoder = cast(RNNLayer, self.encoders[level])
                 summary, states = _rnn_over_groups(encoder, x, offsets)
             else:
-                summary, states = _pool(x, offsets, self.set_pooling), None
+                summary, states = _pool(x, offsets), None
         assert summary is not None
         return summary, states  # states: the top level's per-record outputs
 
@@ -791,7 +783,7 @@ class Unified_RNN(BaseModel):
 
     Each V2 field is encoded bottom-up, level by level, from level 0 up.
     A level's input is its records' embeddings concatenated with the summary
-    of each record's children. A ``set`` level pools each group; a
+    of each record's children. A ``set`` level mean-pools each group; a
     ``sequence`` / ``series`` level runs its RNN over each group and keeps
     the last output, giving one summary per parent record, up to one per sample.
 
@@ -823,8 +815,6 @@ class Unified_RNN(BaseModel):
         num_layers: The layers of each level's RNN, per field.
         dropout: Dropout before each RNN, per field.
         bidirectional: Bidirectional RNNs, per field. Not with per-step labels.
-        set_pooling: ``"mean"`` (default), ``"sum"`` or ``"max"`` for ``set``
-            levels, per field.
         time_feature: Whether timed levels get the time since the previous
             record, per field.
         mask: How :class:`SequenceEmbeddingModel` uses missing-value masks:
@@ -864,7 +854,6 @@ class Unified_RNN(BaseModel):
         num_layers: int | Mapping[str, int] = 1,
         dropout: float | Mapping[str, float] = 0.5,
         bidirectional: bool | Mapping[str, bool] = False,
-        set_pooling: SetPooling | Mapping[str, SetPooling] = "mean",
         time_feature: bool | Mapping[str, bool] = False,
         mask: MaskMode = "ignore",
         pretrain: Sequence[PretrainedEmbedding] | None = None,
@@ -915,13 +904,6 @@ class Unified_RNN(BaseModel):
         bidirectionals = _per_field(
             "bidirectional", bidirectional, fields, False, lambda v: isinstance(v, bool)
         )
-        poolings: dict[str, SetPooling] = _per_field(
-            "set_pooling",
-            set_pooling,
-            fields,
-            "mean",
-            lambda v: v in get_args(SetPooling),
-        )
         time_features = _per_field(
             "time_feature", time_feature, fields, False, lambda v: isinstance(v, bool)
         )
@@ -970,7 +952,6 @@ class Unified_RNN(BaseModel):
                     layers[field],
                     dropouts[field],
                     bidirectionals[field],
-                    poolings[field],
                     time_features[field],
                 )
                 for field in fields

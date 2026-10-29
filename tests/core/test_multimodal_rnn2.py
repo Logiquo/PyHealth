@@ -79,7 +79,6 @@ class TestConfiguration(unittest.TestCase):
             {"rnn_type": "Transformer"},
             {"num_layers": {"visits": 0}},
             {"dropout": 1.5},
-            {"set_pooling": "median"},
         ]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -125,13 +124,7 @@ class TestBottomUp(unittest.TestCase):
         x = torch.tensor([[1.0, -1.0], [3.0, 5.0], [2.0, 2.0]])
         offsets = torch.tensor([0, 2, 2, 3])  # the middle group is empty
         self.assertEqual(
-            _pool(x, offsets, "mean").tolist(), [[2.0, 2.0], [0.0, 0.0], [2.0, 2.0]]
-        )
-        self.assertEqual(
-            _pool(x, offsets, "sum").tolist(), [[4.0, 4.0], [0.0, 0.0], [2.0, 2.0]]
-        )
-        self.assertEqual(
-            _pool(x, offsets, "max").tolist(), [[3.0, 5.0], [0.0, 0.0], [2.0, 2.0]]
+            _pool(x, offsets).tolist(), [[2.0, 2.0], [0.0, 0.0], [2.0, 2.0]]
         )
 
     def test_time_feature(self):
